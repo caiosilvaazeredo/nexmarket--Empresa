@@ -87,12 +87,17 @@ service cloud.firestore {
 
     // Operators (RBAC, RNF01). Bootstrapped by the root email or by an invite.
     match /admins/{uid} {
-      allow read: if isAdmin();
+      // A signed-in user may read their OWN admin doc (so the panel can detect
+      // access / run the invite bootstrap); admins read everyone.
+      allow read: if isAdmin() || (isSignedIn() && request.auth.uid == uid);
+      // Self-bootstrap: root → master; an invited user → exactly the role the
+      // invite granted (no self-escalation). Masters can create any operator.
       allow create: if isMasterAdmin()
-        || (isSignedIn() && request.auth.uid == uid && (
-              isRootAdmin()
-              || exists(/databases/$(database)/documents/adminInvites/$(request.auth.token.email))
-           ));
+        || (isSignedIn() && request.auth.uid == uid && isRootAdmin())
+        || (isSignedIn() && request.auth.uid == uid
+            && exists(/databases/$(database)/documents/adminInvites/$(request.auth.token.email))
+            && incoming().role == get(/databases/$(database)/documents/adminInvites/$(request.auth.token.email)).data.role
+            && incoming().active == true);
       allow update: if isMasterAdmin()
         || (isSignedIn() && request.auth.uid == uid
             && incoming().diff(existing()).affectedKeys().hasOnly(['lastLoginAt', 'updatedAt', 'name', 'photoUrl']));
