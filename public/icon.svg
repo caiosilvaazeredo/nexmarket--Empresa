@@ -1,0 +1,27 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="512" height="512" rx="112" fill="#58CC02"/>
+  <rect width="512" height="512" rx="112" fill="url(#g)" fill-opacity="0.18"/>
+  <g transform="translate(116 120)">
+    <!-- storefront awning -->
+    <path d="M16 64 L24 24 A12 12 0 0 1 36 14 L244 14 A12 12 0 0 1 256 24 L264 64 Z" fill="#FFFFFF"/>
+    <!-- body -->
+    <rect x="32" y="64" width="216" height="168" rx="14" fill="#FFFFFF"/>
+    <!-- door -->
+    <rect x="112" y="132" width="56" height="100" rx="8" fill="#58CC02"/>
+    <!-- window -->
+    <rect x="56" y="108" width="40" height="40" rx="8" fill="#58A700"/>
+    <rect x="184" y="108" width="40" height="40" rx="8" fill="#58A700"/>
+  </g>
+  <!-- validation shield/check badge -->
+  <g transform="translate(300 300)">
+    <circle cx="68" cy="68" r="78" fill="#FFFFFF"/>
+    <circle cx="68" cy="68" r="62" fill="#1E293B"/>
+    <path d="M40 70 L60 90 L98 48" stroke="#58CC02" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  </g>
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#000000"/>
+    </linearGradient>
+  </defs>
+</svg>

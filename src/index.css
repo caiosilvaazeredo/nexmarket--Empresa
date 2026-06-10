@@ -1,0 +1,103 @@
+@import "tailwindcss";
+
+/* Class-based dark mode (toggled by adding `.dark` on <html>). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Brand tokens — the "Duolingo" identity ported 1:1 from the loja/cliente/
+ * entregador apps so the whole platform looks like one product.
+ *  green #58CC02 primary · #58A700 darker 3D border · slate neutrals.
+ */
+@theme {
+  --color-brand: #58CC02;
+  --color-brand-dark: #58A700;
+  --color-brand-hover: #46A302;
+  --color-brand-soft: #E8F9D9;
+
+  --color-danger: #FF4B4B;
+  --color-danger-dark: #EA2B2B;
+  --color-danger-soft: #FEE2E2;
+
+  --color-warn: #F59E0B;
+  --color-warn-soft: #FEF3C7;
+
+  --color-info: #3B82F6;
+  --color-info-soft: #DBEAFE;
+
+  --color-accent: #6366F1;
+  --color-accent-soft: #EEF2FF;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background: #f8fafc;
+  color: #1e293b;
+  -webkit-font-smoothing: antialiased;
+}
+
+.dark body {
+  background: #0b1120;
+  color: #f1f5f9;
+}
+
+/* Slim, modern scrollbars to match a dense data panel. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.dark *::-webkit-scrollbar-thumb {
+  background: #334155;
+  background-clip: content-box;
+}
+
+/* Tiny entrance animation used by drawers / toasts (no extra dep). */
+@keyframes nex-fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-nex-in {
+  animation: nex-fade-in 0.18s ease-out both;
+}
+
+@keyframes nex-slide-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+.animate-nex-slide {
+  animation: nex-slide-in 0.22s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Leaflet sits under our overlays; keep it behaving inside rounded cards. */
+.leaflet-container {
+  background: #e2e8f0;
+  font: inherit;
+}
+.dark .leaflet-container {
+  background: #0f172a;
+}
+
+/* Printable fiscal reports (RF09): hide the app chrome on print. */
+@media print {
+  .no-print { display: none !important; }
+  .print-area { position: absolute; inset: 0; margin: 0; padding: 0; }
+  body { background: #fff; }
+}

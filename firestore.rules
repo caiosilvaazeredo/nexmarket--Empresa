@@ -1,0 +1,332 @@
+rules_version = '2';
+
+// =============================================================================
+// Nexmarket — Firestore Security Rules (INTEGRATED platform)
+//
+// ONE shared database powers all four apps:
+//   • nexmarket--loja        (lojista / manager)   — owns the catalog & stores
+//   • nexmarket--entregador  (driver)              — owns /drivers
+//   • nexmarket--cliente     (customer)            — owns /customers, creates orders
+//   • nexmarket--empresa     (THIS — backoffice)   — owns admin-only collections
+//                                                     and moderates everything
+//
+// This file is the canonical, deployable rule set. It EXTENDS the rules that
+// shipped with nexmarket--loja by turning on the admin role (previously a
+// stub returning false) and adding the admin-only collections used by the
+// Empresa panel (tickets, audit logs, blacklist, settlements, campaigns,
+// fiscal reports, platform config, operators).
+//
+// Deploy from the project owner (the loja repo historically owns deployment):
+//   firebase deploy --only firestore:rules,firestore:indexes
+// =============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    /* ----------------------------- Helpers ----------------------------- */
+    function isSignedIn() { return request.auth != null; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    // A signed-in delivery driver (has a /drivers/{uid} profile).
+    function isDriver() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/drivers/$(request.auth.uid));
+    }
+
+    // --------------------------- Admin (Empresa) ---------------------------
+    // Root super-admin bootstraps the platform (kept in sync with admins.ts).
+    function isRootAdmin() {
+      return isSignedIn() && request.auth.token.email == 'caiosazeredo@cos.ufrj.br';
+    }
+    function adminData() {
+      return get(/databases/$(database)/documents/admins/$(request.auth.uid)).data;
+    }
+    function isAdmin() {
+      return isSignedIn() && (
+        isRootAdmin() ||
+        (exists(/databases/$(database)/documents/admins/$(request.auth.uid)) && adminData().active == true)
+      );
+    }
+    function isMasterAdmin() {
+      return isRootAdmin() || (isAdmin() && adminData().role == 'master');
+    }
+
+    /* ----------------- Collection-group reads for admins ----------------- *
+     * The driver app discovers available orders; a customer reads only their
+     * own; an ADMIN reads everything (RF04/RF07/RF08, RNF04).
+     */
+    match /{path=**}/orders/{orderId} {
+      allow read: if isDriver()
+        || isAdmin()
+        || (isSignedIn() && resource.data.customerId == request.auth.uid);
+    }
+    // Admins reconcile all driver payout requests across stores (RF08).
+    match /{path=**}/payouts/{payoutId} {
+      allow read: if isAdmin();
+    }
+
+    /* ============================ ADMIN COLLECTIONS =========================== */
+
+    // Operators (RBAC). Bootstrapped by the root email or by an invite.
+    match /admins/{uid} {
+      allow read: if isAdmin();
+      allow create: if isMasterAdmin()
+        || (isSignedIn() && request.auth.uid == uid && (
+              isRootAdmin()
+              || exists(/databases/$(database)/documents/adminInvites/$(request.auth.token.email))
+           ));
+      allow update: if isMasterAdmin()
+        || (isSignedIn() && request.auth.uid == uid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['lastLoginAt', 'updatedAt', 'name', 'photoUrl']));
+      allow delete: if isMasterAdmin();
+    }
+
+    match /adminInvites/{email} {
+      // Invited users may read & consume their own invite during first login.
+      allow read: if isAdmin() || (isSignedIn() && request.auth.token.email == email);
+      allow delete: if isMasterAdmin() || (isSignedIn() && request.auth.token.email == email);
+      allow create, update: if isMasterAdmin();
+    }
+
+    // Helpdesk (RF05/RF06).
+    match /tickets/{ticketId} {
+      allow read, create, update: if isAdmin();
+      allow delete: if isMasterAdmin();
+      match /messages/{msgId} {
+        allow read, create: if isAdmin();
+        allow update, delete: if false;
+      }
+    }
+
+    // Immutable audit trail (RNF02).
+    match /auditLogs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && incoming().actorId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // Fraud blacklist (CPF).
+    match /blacklist/{cpf} {
+      allow read, create, delete: if isAdmin();
+      allow update: if isAdmin();
+    }
+
+    // Platform configuration (fees, integrations).
+    match /platformConfig/{docId} {
+      allow read: if isAdmin();
+      allow write: if isMasterAdmin();
+    }
+
+    // Sponsored coupons / campaigns (RF10). Public read so the customer apps
+    // can honor platform-wide coupons; only admins manage them.
+    match /campaigns/{id} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Settlements / repasses (RF08).
+    match /settlements/{id} {
+      allow read, create, update: if isAdmin();
+      allow delete: if isMasterAdmin();
+    }
+
+    // Fiscal reports / Informe de Rendimentos history (RF09). Append-only.
+    match /fiscalReports/{id} {
+      allow read, create: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    /* ============================ SHARED COLLECTIONS ========================== */
+
+    // Delivery drivers (managed by the entregador app; moderated by admins).
+    match /drivers/{driverId} {
+      allow read: if isSignedIn();
+      allow create: if (isSignedIn() && request.auth.uid == driverId) || isAdmin();
+      allow update: if (isSignedIn() && request.auth.uid == driverId) || isAdmin();
+      allow delete: if isMasterAdmin();
+
+      match /payouts/{payoutId} {
+        allow read: if (isSignedIn() && request.auth.uid == driverId) || isAdmin();
+        allow create: if (isSignedIn() && request.auth.uid == driverId
+            && incoming().amount is number && incoming().amount > 0) || isAdmin();
+        allow update: if isAdmin();
+        allow delete: if false;
+      }
+    }
+
+    // Customer profiles (managed by the cliente app; read by admins for CRM).
+    match /customers/{customerId} {
+      allow read: if (isSignedIn() && request.auth.uid == customerId) || isAdmin();
+      allow create, update: if (isSignedIn() && request.auth.uid == customerId
+          && incoming().updatedAt == request.time) || isAdmin();
+      allow delete: if (isSignedIn() && request.auth.uid == customerId) || isMasterAdmin();
+
+      match /addresses/{addressId} {
+        allow read, write: if (isSignedIn() && request.auth.uid == customerId) || isAdmin();
+      }
+    }
+
+    // Store owner profiles.
+    match /users/{userId} {
+      allow read: if (isSignedIn() && request.auth.uid == userId) || isAdmin();
+
+      function isValidUser(data) {
+        return data.keys().hasAll(['name', 'email', 'contact', 'networkName', 'cnpj', 'role', 'createdAt', 'updatedAt'])
+          && data.name is string && data.name.size() > 0 && data.name.size() <= 100
+          && data.email is string && data.email.size() > 0 && data.email.size() <= 150
+          && data.contact is string && data.contact.size() <= 100
+          && data.networkName is string && data.networkName.size() <= 100
+          && data.cnpj is string && data.cnpj.size() <= 100
+          && data.role is string && data.role.size() <= 50
+          && data.createdAt is timestamp
+          && data.updatedAt is timestamp;
+      }
+
+      allow create: if isSignedIn() && request.auth.uid == userId
+        && isValidUser(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn() && request.auth.uid == userId
+        && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'contact', 'networkName', 'cnpj', 'updatedAt'])
+        && incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // Supermarkets (catalog owned by the loja; moderated by admins).
+    match /supermarkets/{supermarketId} {
+      function isSupermarketOwner(smId) {
+        return exists(/databases/$(database)/documents/supermarkets/$(smId))
+          && get(/databases/$(database)/documents/supermarkets/$(smId)).data.ownerId == request.auth.uid;
+      }
+      function isValidSupermarket(data) {
+        return data.keys().hasAll(['name', 'ownerId', 'themeColor', 'logoUrl', 'createdAt', 'updatedAt'])
+          && data.keys().size() == 6
+          && data.name is string && data.name.size() > 0 && data.name.size() <= 100
+          && data.ownerId is string && data.ownerId == request.auth.uid
+          && data.themeColor is string && data.themeColor.size() <= 20
+          && data.logoUrl is string && data.logoUrl.size() <= 800000
+          && data.createdAt is timestamp
+          && data.updatedAt is timestamp;
+      }
+
+      allow read: if true;
+      allow create: if (isSignedIn() && isValidId(supermarketId) && isValidSupermarket(incoming())
+          && incoming().createdAt == request.time && incoming().updatedAt == request.time)
+        || isAdmin();
+      // Owners may edit branding; admins moderate (approval, fees, active…).
+      allow update: if isAdmin()
+        || (isSignedIn() && existing().ownerId == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'themeColor', 'logoUrl', 'updatedAt'])
+            && incoming().name is string && incoming().name.size() > 0 && incoming().name.size() <= 100
+            && incoming().themeColor is string && incoming().themeColor.size() <= 20
+            && incoming().logoUrl is string && incoming().logoUrl.size() <= 800000
+            && incoming().updatedAt == request.time);
+      allow delete: if (isSignedIn() && existing().ownerId == request.auth.uid) || isMasterAdmin();
+
+      match /gondolas/{gondolaId} {
+        allow read: if true;
+        allow write: if (isSignedIn() && isSupermarketOwner(supermarketId)) || isAdmin();
+      }
+      match /categories/{catId} {
+        allow read: if true;
+        allow write: if (isSignedIn() && isSupermarketOwner(supermarketId)) || isAdmin();
+      }
+      match /products/{productId} {
+        allow read: if true;
+        allow write: if (isSignedIn() && isSupermarketOwner(supermarketId)) || isAdmin();
+      }
+      match /coupons/{code} {
+        allow read: if true;
+        allow write: if (isSignedIn() && isSupermarketOwner(supermarketId)) || isAdmin();
+      }
+      match /promotions/{promoId} {
+        allow read: if true;
+        allow write: if (isSignedIn() && isSupermarketOwner(supermarketId)) || isAdmin();
+      }
+      match /deliveryConfig/{docId} {
+        allow read: if true;
+        allow write: if (isSignedIn() && isSupermarketOwner(supermarketId)) || isAdmin();
+      }
+      match /settings/{docId} {
+        allow read: if true;
+        allow write: if (isSignedIn() && isSupermarketOwner(supermarketId)) || isAdmin();
+      }
+      match /staff/{docId} {
+        allow read: if true;
+        allow write: if (isSignedIn() && isSupermarketOwner(supermarketId)) || isAdmin();
+      }
+      match /storefront/{docId} {
+        allow read: if true;
+        allow write: if (isSignedIn() && isSupermarketOwner(supermarketId)) || isAdmin();
+      }
+
+      match /orders/{orderId} {
+        function isValidOrder(data) {
+          return data.keys().hasAll(['supermarketId', 'customerId', 'status', 'items', 'total', 'createdAt', 'updatedAt'])
+            && data.supermarketId is string && data.supermarketId == supermarketId
+            && data.customerId is string && data.customerId.size() <= 128
+            && data.status is string && data.status.size() <= 50
+            && data.items is list && data.items.size() <= 200
+            && data.total is number && data.total >= 0
+            && data.createdAt is timestamp
+            && data.updatedAt is timestamp;
+        }
+
+        allow read: if isAdmin()
+          || isSupermarketOwner(supermarketId)
+          || isDriver()
+          || (isSignedIn() && existing().customerId == request.auth.uid);
+
+        allow create: if isAdmin()
+          || (isValidOrder(incoming())
+              && incoming().createdAt == request.time
+              && incoming().updatedAt == request.time
+              && (request.auth == null
+                  || incoming().customerId == request.auth.uid
+                  || isSupermarketOwner(supermarketId)));
+
+        // Admins may write moderation fields (refunds, flags); the
+        // store/driver/customer keep their original constrained update.
+        allow update: if isAdmin()
+          || (
+            incoming().updatedAt == request.time
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+                'status', 'items', 'total', 'subtotal', 'discount', 'couponCode', 'updatedAt',
+                'deliveryStatus', 'driverId', 'driverName', 'driverLocation', 'driverEarnings',
+                'acceptedAt', 'pickedUpAt', 'deliveredAt', 'proofOfDelivery', 'problemReport',
+                'deliveryAddress', 'customerName', 'customerPhone', 'deliveryFee',
+                'fulfillment', 'paymentMethod', 'paymentStatus', 'scheduledFor', 'changeFor', 'notes',
+                'rating', 'ratingComment', 'ratingTags', 'ratingPhotoUrl'
+            ])
+            && (
+                !incoming().diff(existing()).affectedKeys().hasAny(['driverId'])
+                || (
+                    isSignedIn()
+                    && (existing().get('driverId', '') == '' || existing().get('driverId', '') == request.auth.uid)
+                    && (incoming().get('driverId', '') == '' || incoming().get('driverId', '') == request.auth.uid)
+                   )
+            )
+          );
+
+        allow delete: if (isSignedIn() && isSupermarketOwner(supermarketId)) || isMasterAdmin();
+
+        match /messages/{msgId} {
+          allow read: if true;
+          allow create: if isSignedIn()
+            && incoming().keys().hasAll(['text', 'senderId', 'senderRole', 'createdAt'])
+            && incoming().text is string && incoming().text.size() > 0 && incoming().text.size() <= 2000
+            && incoming().senderId is string && incoming().senderId.size() <= 128
+            && incoming().senderRole is string && incoming().senderRole.size() <= 20
+            && incoming().createdAt == request.time;
+          allow update, delete: if false;
+        }
+      }
+    }
+  }
+}
