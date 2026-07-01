@@ -292,6 +292,11 @@ export interface PaymentInfo {
   status?: PaymentStatus;
   provider?: 'stripe' | 'mercadopago' | 'pagarme' | string;
   tokenId?: string;
+  /** Stripe: PaymentIntent/Checkout associados — permitem estorno real. */
+  paymentIntentId?: string;
+  checkoutSessionId?: string;
+  refundId?: string;
+  failureReason?: string;
   paidAt?: any;
   /** Admin refund bookkeeping. */
   refundedAmount?: number;

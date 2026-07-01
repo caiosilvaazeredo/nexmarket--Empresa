@@ -20,6 +20,7 @@ import { confirm } from '../components/ui/Confirm';
 import { useSub } from '../hooks/useSub';
 import { useUIStore } from '../store/useUIStore';
 import { subscribePlatformConfig, savePlatformConfig } from '../lib/platform';
+import { gatewayHealth, type GatewayHealth } from '../lib/payments';
 import { subscribeBlacklist, addToBlacklist, removeFromBlacklist } from '../lib/blacklist';
 import { seedDemoData, clearDemoData } from '../lib/seed';
 import { maskCpf } from '../lib/format';
@@ -78,7 +79,10 @@ export default function Settings() {
           <CardHeader title="Integrações" subtitle="Gateways e serviços externos (RNF05)" icon={<Plug className="w-5 h-5 text-accent" />} className="p-0 mb-4" />
           <div className="space-y-3">
             <Field label="Gateway de pagamento (Split/estornos)"><Input value={form.paymentsProvider ?? ''} onChange={(e) => set({ paymentsProvider: e.target.value })} placeholder="stripe · pagarme · mercadopago" /></Field>
-            <Field label="Endpoint de pagamentos (servidor)" hint="Estornos e repasses rodam no backend com a chave secreta."><Input value={form.paymentsApiUrl ?? ''} onChange={(e) => set({ paymentsApiUrl: e.target.value })} placeholder="https://api.suaempresa.com/payments" /></Field>
+            <Field label="Endpoint de pagamentos (servidor)" hint="Servidor da pasta server/ deste repositório — estornos e repasses rodam nele com a chave secreta da Stripe.">
+              <Input value={form.paymentsApiUrl ?? ''} onChange={(e) => set({ paymentsApiUrl: e.target.value })} placeholder="https://pagamentos.suaempresa.com" />
+            </Field>
+            <PaymentsHealthCheck url={form.paymentsApiUrl || ''} />
             <Field label="API de background check (CPF/Detran)"><Input value={form.backgroundCheckApiUrl ?? ''} onChange={(e) => set({ backgroundCheckApiUrl: e.target.value })} placeholder="https://api.checagora.com" /></Field>
           </div>
         </Card>
@@ -115,6 +119,48 @@ export default function Settings() {
         </div>
       </div>
     </Page>
+  );
+}
+
+/** Diagnóstico do servidor de pagamentos (server/): Stripe, webhook e Firestore admin. */
+function PaymentsHealthCheck({ url }: { url: string }) {
+  const [checking, setChecking] = useState(false);
+  const [health, setHealth] = useState<GatewayHealth | null>(null);
+  const [error, setError] = useState('');
+
+  const check = async () => {
+    if (!url.trim()) {
+      setError('Preencha o endpoint acima antes de testar.');
+      setHealth(null);
+      return;
+    }
+    setChecking(true);
+    setError('');
+    setHealth(null);
+    try {
+      setHealth(await gatewayHealth(url.trim()));
+    } catch (e: any) {
+      setError(e?.message || 'Não foi possível conectar ao servidor de pagamentos.');
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <Button variant="secondary" onClick={check} disabled={checking}>
+        <Plug className="w-4 h-4" /> {checking ? 'Testando…' : 'Testar conexão'}
+      </Button>
+      {error && <p className="text-xs font-bold text-danger">{error}</p>}
+      {health && (
+        <div className="flex flex-wrap gap-2">
+          <Badge tone={health.stripe ? 'green' : 'red'}>Stripe {health.stripe ? 'OK' : 'falhou'}</Badge>
+          <Badge tone={health.stripeAccountLive ? 'amber' : 'blue'}>{health.stripeAccountLive ? 'Modo LIVE' : 'Modo TESTE'}</Badge>
+          <Badge tone={health.webhookConfigured ? 'green' : 'amber'}>Webhook {health.webhookConfigured ? 'configurado' : 'pendente'}</Badge>
+          <Badge tone={health.firestoreAdmin ? 'green' : 'amber'}>Firestore admin {health.firestoreAdmin ? 'ativo' : 'inativo'}</Badge>
+        </div>
+      )}
+    </div>
   );
 }
 

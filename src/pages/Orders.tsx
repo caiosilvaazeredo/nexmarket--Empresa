@@ -23,6 +23,7 @@ import { useSub } from '../hooks/useSub';
 import { usePermission } from '../hooks/usePermission';
 import { useUIStore } from '../store/useUIStore';
 import { fetchOrdersPage, refundOrder, flagOrder } from '../lib/orders';
+import { gatewayRefund } from '../lib/payments';
 import { subscribeOrderMessages, sendOrderMessage } from '../lib/tickets';
 import { subscribeStores } from '../lib/stores';
 import { orderStatusBadge, deliveryStatusBadge, paymentStatusBadge } from '../lib/status';
@@ -197,9 +198,37 @@ function OrderDrawer({ order, storeName, onClose }: { order: Order | null; store
   const doRefund = async () => {
     const amt = Number(amount);
     if (!amt || amt <= 0 || !reason.trim()) return;
+
+    // Pagamento online (Stripe): executa o estorno REAL no gateway primeiro.
+    const pi = order.payment?.paymentIntentId;
+    let viaStripe = false;
+    if (pi) {
+      try {
+        await gatewayRefund({
+          smId: order.supermarketId,
+          orderId: order.id,
+          paymentIntentId: pi,
+          amount: amt,
+          reason: reason.trim(),
+        });
+        viaStripe = true;
+      } catch (e: any) {
+        if (!e?.notConfigured) {
+          toast(`Estorno via Stripe falhou: ${e?.message || e}`, 'error');
+          return;
+        }
+        // servidor não configurado → segue só com o registro contábil
+      }
+    }
+
     await refundOrder(order, amt, reason.trim());
     setRefundOpen(false);
-    toast('Estorno registrado e enviado ao gateway.', 'success');
+    toast(
+      viaStripe
+        ? 'Estorno executado na Stripe e registrado.'
+        : 'Estorno registrado. Sem cobrança online associada — faça a devolução manual.',
+      'success',
+    );
   };
 
   const roleName = { driver: 'Entregador', customer: 'Cliente', store: 'Loja', support: 'Suporte' } as const;
