@@ -136,6 +136,7 @@ As chaves ficam em **Dashboard Stripe → Developers → API keys**.
 | GET | `/health` (`?deep=1`) | diagnóstico (usado pelo botão *Testar conexão*) |
 | GET | `/config` | chave publicável + moeda |
 | POST | `/api/payments/checkout-session` | Stripe Checkout (cartão); `saveCard: true` guarda o cartão p/ 1 toque |
+| POST | `/api/payments/payment-intent` | PaymentIntent p/ **Apple Pay/Google Pay** nativos no app (clientSecret) |
 | POST | `/api/payments/pix-intent` | cobrança PIX (QR + copia-e-cola) |
 | GET | `/api/payments/status` | consulta/concilia status de pagamento |
 | POST | `/api/payments/refund` | estorno (admin ou dono da loja) |

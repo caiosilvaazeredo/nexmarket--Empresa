@@ -209,6 +209,40 @@ app.post('/api/payments/checkout-session', requireAuth, asyncRoute(async (req, r
   res.json({ url: session.url, sessionId: session.id, amount: cents / 100 });
 }));
 
+/* -------------------- Apple Pay / Google Pay (in-app) ---------------------- */
+
+/**
+ * PaymentIntent para as carteiras nativas (Apple Pay/Google Pay via
+ * @stripe/stripe-react-native). O app confirma com confirmPlatformPayPayment
+ * usando o clientSecret — o cartão tokenizado pela carteira nunca passa pelo
+ * nosso código. (Na página do Stripe Checkout as carteiras já aparecem
+ * automaticamente; este endpoint é para o botão DENTRO do app.)
+ */
+app.post('/api/payments/payment-intent', requireAuth, asyncRoute(async (req, res) => {
+  const { smId, orderId, amount } = req.body || {};
+  if (!smId || !orderId) {
+    return res.status(400).json({ error: 'smId e orderId são obrigatórios.' });
+  }
+  const { cents, source } = await resolveAmount({ smId, orderId, amount });
+  const customerId = await getOrCreateCustomerId(req.user);
+
+  const intent = await stripe.paymentIntents.create({
+    amount: cents,
+    currency: CURRENCY,
+    customer: customerId,
+    payment_method_types: ['card'], // Apple Pay/Google Pay tokenizam como card
+    metadata: { smId, orderId, customerId: req.user.uid, amountSource: source, wallet: 'platform_pay' },
+  });
+
+  res.json({
+    clientSecret: intent.client_secret,
+    paymentIntentId: intent.id,
+    publishableKey: STRIPE_PUBLISHABLE_KEY,
+    amount: cents / 100,
+    testEnv: STRIPE_SECRET_KEY.startsWith('sk_test'),
+  });
+}));
+
 /* ------------------------- Cartões salvos (1 toque) ------------------------ */
 
 app.get('/api/payments/saved-methods', requireAuth, asyncRoute(async (req, res) => {
