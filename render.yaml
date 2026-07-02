@@ -1,0 +1,37 @@
+# =============================================================================
+# Blueprint do Render — publica o SERVIDOR DE PAGAMENTOS com um clique.
+# Render → New → Blueprint → conecte este repositório. As variáveis marcadas
+# com sync:false são pedidas na criação (cole os valores do server/.env).
+# O plano free hiberna após inatividade (primeira chamada demora ~30s);
+# para produção use o plano starter.
+# =============================================================================
+services:
+  - type: web
+    name: nexmarket-payments
+    runtime: node
+    rootDir: server
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: STRIPE_SECRET_KEY
+        sync: false # sk_test_... / sk_live_... — NUNCA commitar
+      - key: STRIPE_PUBLISHABLE_KEY
+        sync: false # pk_test_... (pode colar a publicável)
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false # whsec_... (crie o endpoint de webhook depois do 1º deploy)
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false # JSON inline da service account (recomendado)
+      - key: PUBLIC_URL
+        sync: false # https://nexmarket-payments.onrender.com (a URL que o Render gerar)
+      - key: ROOT_ADMIN_EMAIL
+        value: caiosazeredo@cos.ufrj.br
+      - key: FIREBASE_PROJECT_ID
+        value: gen-lang-client-0615772467
+      - key: FIRESTORE_DATABASE_ID
+        value: ai-studio-2ab80fc8-bdc4-40c4-9282-35669db98074
+      - key: CURRENCY
+        value: brl
+      # Opcionais: PICPAY_TOKEN, PICPAY_SELLER_TOKEN, NUPAY_API_URL,
+      # NUPAY_API_KEY, SELF_REFUND_LIMIT_BRL, MAX_TIP_BRL, ALLOWED_ORIGINS
