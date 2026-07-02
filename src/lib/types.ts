@@ -348,6 +348,9 @@ export interface Order {
   driverId?: string;
   driverName?: string;
   driverEarnings?: number;
+  /** Gorjeta do cliente — repassada integralmente ao entregador. */
+  tip?: number;
+  tipPendingCredit?: number;
   driverLocation?: GeoPoint | null;
   acceptedAt?: any;
   pickedUpAt?: any;
@@ -597,6 +600,9 @@ export interface PlatformConfig {
   /** Default commission % applied to new stores. */
   defaultCommissionPct?: number;
   defaultFixedFee?: number;
+  /** Cashback (%) creditado na carteira do cliente a cada pedido entregue.
+   *  Também é espelhado em platformConfig/public para os apps lerem. */
+  cashbackPct?: number;
   /** Integration seams (RNF05). */
   paymentsProvider?: string;
   paymentsApiUrl?: string;

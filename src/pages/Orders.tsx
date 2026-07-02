@@ -275,6 +275,7 @@ function OrderDrawer({ order, storeName, onClose }: { order: Order | null; store
               <Row label="Subtotal" value={brl(order.subtotal)} />
               <Row label="Entrega" value={brl(order.deliveryFee)} />
               {order.discount ? <Row label={`Desconto ${order.couponCode ? `(${order.couponCode})` : ''}`} value={`- ${brl(order.discount)}`} /> : null}
+              {order.tip ? <Row label="Gorjeta (100% do entregador)" value={brl(order.tip)} /> : null}
               <Row label="Total" value={brl(order.total)} bold />
               {order.payment?.refundedAmount ? <Row label="Estornado" value={`- ${brl(order.payment.refundedAmount)}`} /> : null}
             </div>

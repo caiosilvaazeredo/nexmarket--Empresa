@@ -29,6 +29,7 @@ import {
   db,
   FieldValue,
   getOrder,
+  orderRef,
   markOrderPaid,
   markOrderPaymentFailed,
   markOrderRefunded,
@@ -99,6 +100,39 @@ function safeNext(next) {
   return /^[a-z][a-z0-9+.-]*:\/\/[^\s]*$/i.test(next) && !/^javascript:/i.test(next) ? next : '';
 }
 
+/* ---------------------- Stripe Customer por usuário ------------------------ */
+/** Cartões salvos e assinaturas ficam presos a um Customer da Stripe amarrado
+ * ao uid do Firebase (metadata.firebaseUid). Cache em memória evita duplicatas
+ * enquanto o índice de busca da Stripe atualiza. */
+const customerIdCache = new Map();
+
+async function getOrCreateCustomerId(user) {
+  if (customerIdCache.has(user.uid)) return customerIdCache.get(user.uid);
+  const found = await stripe.customers.search({
+    query: `metadata['firebaseUid']:'${user.uid}'`,
+    limit: 1,
+  });
+  let customer = found.data[0];
+  if (!customer) {
+    customer = await stripe.customers.create({
+      email: user.email || undefined,
+      metadata: { firebaseUid: user.uid },
+    });
+  }
+  customerIdCache.set(user.uid, customer.id);
+  return customer.id;
+}
+
+/** Garante que o payment method pertence ao Customer do usuário logado. */
+async function assertOwnPaymentMethod(user, paymentMethodId) {
+  const customerId = await getOrCreateCustomerId(user);
+  const pm = await stripe.paymentMethods.retrieve(paymentMethodId);
+  if (pm.customer !== customerId) {
+    throw Object.assign(new Error('Cartão não pertence a este usuário.'), { statusCode: 403 });
+  }
+  return { customerId, pm };
+}
+
 /* ------------------------------- Diagnóstico ------------------------------- */
 
 app.get('/health', asyncRoute(async (req, res) => {
@@ -124,7 +158,7 @@ app.get('/config', (req, res) => {
 /* ------------------------- Checkout (cartão online) ------------------------ */
 
 app.post('/api/payments/checkout-session', requireAuth, asyncRoute(async (req, res) => {
-  const { smId, orderId, amount, storeName, customerEmail, next } = req.body || {};
+  const { smId, orderId, amount, storeName, next, saveCard } = req.body || {};
   if (!smId || !orderId) {
     return res.status(400).json({ error: 'smId e orderId são obrigatórios.' });
   }
@@ -142,6 +176,10 @@ app.post('/api/payments/checkout-session', requireAuth, asyncRoute(async (req, r
     (deepLink ? `&next=${encodeURIComponent(deepLink)}` : '');
   const cancelUrl = `${PUBLIC_URL}/return/cancel` + (deepLink ? `?next=${encodeURIComponent(deepLink)}` : '');
 
+  // Customer amarrado ao uid: habilita salvar cartão (1 toque nas próximas
+  // compras) e Apple Pay/Google Pay/Link direto na página do Checkout.
+  const customerId = await getOrCreateCustomerId(req.user);
+
   const session = await stripe.checkout.sessions.create({
     mode: 'payment',
     payment_method_types: ['card'],
@@ -158,14 +196,204 @@ app.post('/api/payments/checkout-session', requireAuth, asyncRoute(async (req, r
         },
       },
     ],
-    customer_email: customerEmail || req.user.email || undefined,
+    customer: customerId,
     metadata,
-    payment_intent_data: { metadata },
+    payment_intent_data: {
+      metadata,
+      ...(saveCard ? { setup_future_usage: 'off_session' } : {}),
+    },
     success_url: successUrl,
     cancel_url: cancelUrl,
   });
 
   res.json({ url: session.url, sessionId: session.id, amount: cents / 100 });
+}));
+
+/* ------------------------- Cartões salvos (1 toque) ------------------------ */
+
+app.get('/api/payments/saved-methods', requireAuth, asyncRoute(async (req, res) => {
+  const customerId = await getOrCreateCustomerId(req.user);
+  const pms = await stripe.paymentMethods.list({ customer: customerId, type: 'card' });
+  res.json({
+    methods: pms.data.map((pm) => ({
+      id: pm.id,
+      brand: pm.card?.brand || 'card',
+      last4: pm.card?.last4 || '',
+      expMonth: pm.card?.exp_month,
+      expYear: pm.card?.exp_year,
+    })),
+  });
+}));
+
+app.delete('/api/payments/saved-methods/:id', requireAuth, asyncRoute(async (req, res) => {
+  await assertOwnPaymentMethod(req.user, req.params.id);
+  await stripe.paymentMethods.detach(req.params.id);
+  res.json({ ok: true });
+}));
+
+/**
+ * Pagamento em 1 toque com cartão salvo (off_session).
+ * kind='order' cobra o pedido (valor validado no Firestore quando disponível);
+ * kind='tip' cobra uma gorjeta avulsa pós-entrega (valor livre, com teto).
+ */
+app.post('/api/payments/charge-saved', requireAuth, asyncRoute(async (req, res) => {
+  const { smId, orderId, paymentMethodId, amount, kind = 'order' } = req.body || {};
+  if (!smId || !orderId || !paymentMethodId) {
+    return res.status(400).json({ error: 'smId, orderId e paymentMethodId são obrigatórios.' });
+  }
+  const { customerId } = await assertOwnPaymentMethod(req.user, paymentMethodId);
+
+  let cents;
+  if (kind === 'tip') {
+    cents = toCents(amount);
+    const MAX_TIP = toCents(process.env.MAX_TIP_BRL || 200);
+    if (!(cents > 0) || cents > MAX_TIP) {
+      return res.status(400).json({ error: 'Valor de gorjeta inválido.' });
+    }
+  } else {
+    ({ cents } = await resolveAmount({ smId, orderId, amount }));
+  }
+
+  try {
+    const intent = await stripe.paymentIntents.create({
+      amount: cents,
+      currency: CURRENCY,
+      customer: customerId,
+      payment_method: paymentMethodId,
+      off_session: true,
+      confirm: true,
+      metadata: { smId, orderId, customerId: req.user.uid, type: kind },
+    });
+    // Pedido (não gorjeta) pago → concilia no Firestore quando possível.
+    if (kind === 'order' && intent.status === 'succeeded' && firestoreEnabled) {
+      await markOrderPaid({ smId, orderId, paymentIntentId: intent.id, method: 'card_online' });
+    }
+    res.json({
+      ok: intent.status === 'succeeded',
+      status: intent.status,
+      paymentIntentId: intent.id,
+      amount: cents / 100,
+    });
+  } catch (e) {
+    // Cartão exigiu autenticação (3DS) fora de sessão → app cai para o Checkout.
+    if (e?.code === 'authentication_required') {
+      return res.status(402).json({
+        error: 'Este cartão exige autenticação. Use o pagamento pelo navegador.',
+        requiresAction: true,
+      });
+    }
+    throw e;
+  }
+}));
+
+/** Gorjeta pós-entrega via Stripe Checkout (quando não há cartão salvo). */
+app.post('/api/payments/tip-checkout', requireAuth, asyncRoute(async (req, res) => {
+  const { smId, orderId, amount, driverName, next } = req.body || {};
+  const cents = toCents(amount);
+  const MAX_TIP = toCents(process.env.MAX_TIP_BRL || 200);
+  if (!smId || !orderId || !(cents > 0) || cents > MAX_TIP) {
+    return res.status(400).json({ error: 'Dados de gorjeta inválidos.' });
+  }
+  const customerId = await getOrCreateCustomerId(req.user);
+  const deepLink = safeNext(next);
+  const metadata = { smId, orderId, customerId: req.user.uid, type: 'tip' };
+  const session = await stripe.checkout.sessions.create({
+    mode: 'payment',
+    payment_method_types: ['card'],
+    line_items: [
+      {
+        quantity: 1,
+        price_data: {
+          currency: CURRENCY,
+          unit_amount: cents,
+          product_data: {
+            name: `Gorjeta${driverName ? ` para ${driverName}` : ''} — pedido #${String(orderId).slice(0, 8)}`,
+            description: '100% do valor vai para o entregador',
+          },
+        },
+      },
+    ],
+    customer: customerId,
+    metadata,
+    payment_intent_data: { metadata },
+    success_url:
+      `${PUBLIC_URL}/return/success?session_id={CHECKOUT_SESSION_ID}` +
+      (deepLink ? `&next=${encodeURIComponent(deepLink)}` : ''),
+    cancel_url: `${PUBLIC_URL}/return/cancel` + (deepLink ? `?next=${encodeURIComponent(deepLink)}` : ''),
+  });
+  res.json({ url: session.url, sessionId: session.id, amount: cents / 100 });
+}));
+
+/* --------------------- Reembolso self-service por item --------------------- */
+
+/**
+ * Cliente reporta itens com problema e recebe estorno parcial AUTOMÁTICO até o
+ * teto (SELF_REFUND_LIMIT_BRL, padrão R$ 50 e no máx. 50% do pedido). Acima do
+ * teto devolve needsReview=true e o app abre um chamado para a Empresa.
+ */
+app.post('/api/payments/item-refund', requireAuth, asyncRoute(async (req, res) => {
+  const { smId, orderId, amount, reason } = req.body || {};
+  const cents = toCents(amount);
+  if (!smId || !orderId || !(cents > 0)) {
+    return res.status(400).json({ error: 'smId, orderId e amount são obrigatórios.' });
+  }
+
+  const LIMIT = toCents(process.env.SELF_REFUND_LIMIT_BRL || 50);
+  let paymentIntentId = req.body?.paymentIntentId;
+  let maxCents = LIMIT;
+
+  if (firestoreEnabled) {
+    const order = await getOrder(smId, orderId);
+    if (!order) return res.status(404).json({ error: 'Pedido não encontrado.' });
+    if (order.customerId !== req.user.uid) {
+      return res.status(403).json({ error: 'Este pedido não é seu.' });
+    }
+    if (order.payment?.selfRefunded) {
+      return res.status(409).json({ error: 'Este pedido já recebeu um reembolso automático.' });
+    }
+    paymentIntentId = paymentIntentId || order.payment?.paymentIntentId;
+    maxCents = Math.min(LIMIT, Math.floor(toCents(order.total || 0) * 0.5));
+  }
+
+  if (!paymentIntentId) {
+    return res.status(400).json({
+      error: 'Pedido sem pagamento online associado — o reembolso será tratado pelo suporte.',
+      notOnline: true,
+    });
+  }
+  if (cents > maxCents) {
+    return res.status(422).json({
+      error: 'Valor acima do limite de reembolso automático — enviado para análise do suporte.',
+      needsReview: true,
+      limit: maxCents / 100,
+    });
+  }
+
+  const refund = await stripe.refunds.create({
+    payment_intent: paymentIntentId,
+    amount: cents,
+    reason: 'requested_by_customer',
+    metadata: { smId, orderId, requestedBy: req.user.uid, selfService: 'true', note: reason || '' },
+  });
+
+  if (firestoreEnabled) {
+    const ref = orderRef(smId, orderId);
+    await ref.set(
+      {
+        payment: {
+          refundedAmount: cents / 100,
+          refundId: refund.id,
+          refundReason: reason || 'Itens com problema (self-service)',
+          refundedAt: FieldValue.serverTimestamp(),
+          selfRefunded: true,
+        },
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    );
+  }
+
+  res.json({ ok: true, refundId: refund.id, amount: cents / 100 });
 }));
 
 /* --------------------------------- PIX ------------------------------------ */
@@ -407,6 +635,30 @@ app.post('/api/connect/payout', requireAuth, asyncRoute(async (req, res) => {
   }
 
   res.json({ ok: true, transferId: transfer.id, amount: cents / 100 });
+}));
+
+/* --------------------- Push transacional (relay Expo) ---------------------- */
+
+/**
+ * Relay de notificações push: loja/entregador chamam este endpoint com o token
+ * Expo do cliente (que viaja no documento do pedido) para avisar mudanças de
+ * status. O servidor apenas repassa para a API pública do Expo.
+ */
+app.post('/api/notifications/send', requireAuth, asyncRoute(async (req, res) => {
+  const { to, title, body, data } = req.body || {};
+  if (!to || !/^Expo(nent)?PushToken\[.+\]$/.test(String(to))) {
+    return res.status(400).json({ error: 'Token de push Expo inválido.' });
+  }
+  if (!title || !body) {
+    return res.status(400).json({ error: 'title e body são obrigatórios.' });
+  }
+  const r = await fetch('https://exp.host/--/api/v2/push/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to, title: String(title).slice(0, 120), body: String(body).slice(0, 240), sound: 'default', data: data || {} }),
+  });
+  const out = await r.json().catch(() => ({}));
+  res.json({ ok: r.ok, receipt: out?.data || null });
 }));
 
 /* --------------------------------- Webhook -------------------------------- */

@@ -212,7 +212,7 @@ function Settlements({
       const driverMap = new Map<string, { net: number; count: number }>();
       for (const o of orders) {
         if (o.status === 'cancelled') continue;
-        const subtotal = o.subtotal ?? Math.max(0, (o.total || 0) - (o.deliveryFee || 0));
+        const subtotal = o.subtotal ?? Math.max(0, (o.total || 0) - (o.deliveryFee || 0) - (o.tip || 0));
         const { commissionPct, fixedFee } = feeFor(o.supermarketId);
         const commission = (subtotal * commissionPct) / 100 + fixedFee;
         const s = storeMap.get(o.supermarketId) || { gross: 0, fees: 0, count: 0 };
@@ -222,7 +222,8 @@ function Settlements({
         storeMap.set(o.supermarketId, s);
         if (o.driverId) {
           const d = driverMap.get(o.driverId) || { net: 0, count: 0 };
-          d.net += o.driverEarnings || 0;
+          // frete + gorjeta (a gorjeta é integral do entregador)
+          d.net += (o.driverEarnings || 0) + (o.tip || 0);
           d.count += 1;
           driverMap.set(o.driverId, d);
         }

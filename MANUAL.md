@@ -135,16 +135,44 @@ As chaves ficam em **Dashboard Stripe → Developers → API keys**.
 |---|---|---|
 | GET | `/health` (`?deep=1`) | diagnóstico (usado pelo botão *Testar conexão*) |
 | GET | `/config` | chave publicável + moeda |
-| POST | `/api/payments/checkout-session` | Stripe Checkout (cartão) para um pedido |
+| POST | `/api/payments/checkout-session` | Stripe Checkout (cartão); `saveCard: true` guarda o cartão p/ 1 toque |
 | POST | `/api/payments/pix-intent` | cobrança PIX (QR + copia-e-cola) |
 | GET | `/api/payments/status` | consulta/concilia status de pagamento |
 | POST | `/api/payments/refund` | estorno (admin ou dono da loja) |
+| GET/DELETE | `/api/payments/saved-methods[/:id]` | cartões salvos do usuário (listar/remover) |
+| POST | `/api/payments/charge-saved` | pagamento em 1 toque com cartão salvo (`kind: order\|tip`) |
+| POST | `/api/payments/tip-checkout` | gorjeta pós-entrega via Checkout |
+| POST | `/api/payments/item-refund` | reembolso self-service por item (cliente), com teto automático |
+| POST | `/api/notifications/send` | relay de push Expo (notificações transacionais) |
 | POST | `/api/webhooks/stripe` | webhook da Stripe |
 | POST | `/api/connect/account-link` | onboarding Connect do entregador |
 | GET | `/api/connect/status` | status da conta Connect |
 | POST | `/api/connect/payout` | repasse de saque (admin) |
 
 Todos os endpoints `/api/*` (exceto webhook) exigem `Authorization: Bearer <Firebase ID token>`.
+
+Variáveis opcionais do servidor: `SELF_REFUND_LIMIT_BRL` (teto do reembolso
+automático, padrão 50) e `MAX_TIP_BRL` (teto de gorjeta, padrão 200).
+
+### Estado do PIX na conta
+
+A preferência de exibição do Pix já foi ligada via API, mas a *capability*
+`pix_payments` de contas BR **só ativa pelo Dashboard**: acesse
+Settings → Payment methods → **Pix** → Ativar (pode pedir a conclusão do
+cadastro da conta). Até lá o app oferece cartão automaticamente e o servidor
+responde `409 pixUnavailable` — nenhuma mudança de código é necessária depois
+da ativação.
+
+### Novidades da plataforma (ver ROADMAP.md)
+
+- **Cashback/carteira**: defina o % em Configurações → Comercial; o valor é
+  espelhado em `platformConfig/public` e creditado na carteira do cliente a
+  cada entrega. O saldo vira desconto no checkout.
+- **Dashboard**: KPIs com variação vs. semana anterior + alertas proativos
+  (cancelamentos, pagamentos travados, aprovações pendentes, falta de
+  entregadores online).
+- **Financeiro**: gorjetas somam ao repasse do entregador (100% dele) e nunca
+  entram na comissão da plataforma.
 
 ## 🔁 Operações de pagamento no painel
 

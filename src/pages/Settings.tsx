@@ -42,6 +42,7 @@ export default function Settings() {
     await savePlatformConfig({
       defaultCommissionPct: Number(form.defaultCommissionPct) || 0,
       defaultFixedFee: Number(form.defaultFixedFee) || 0,
+      cashbackPct: Number(form.cashbackPct) || 0,
       companyName: form.companyName || '',
       companyCnpj: form.companyCnpj || '',
       paymentsProvider: form.paymentsProvider || '',
@@ -71,6 +72,11 @@ export default function Settings() {
           <div className="grid grid-cols-2 gap-3 mt-3">
             <Field label="Razão social"><Input value={form.companyName ?? ''} onChange={(e) => set({ companyName: e.target.value })} placeholder="Nexmarket Ltda." /></Field>
             <Field label="CNPJ"><Input value={form.companyCnpj ?? ''} onChange={(e) => set({ companyCnpj: e.target.value })} placeholder="00.000.000/0001-00" /></Field>
+          </div>
+          <div className="mt-3">
+            <Field label="Cashback ao cliente (%)" hint="Creditado na carteira do cliente a cada pedido entregue (0 desliga).">
+              <Input type="number" value={form.cashbackPct ?? ''} onChange={(e) => set({ cashbackPct: Number(e.target.value) })} placeholder="2" />
+            </Field>
           </div>
         </Card>
 

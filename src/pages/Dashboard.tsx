@@ -93,6 +93,44 @@ export default function Dashboard() {
   const zones = useMemo(() => computeDemandZones(liveOrders, drivers), [liveOrders, drivers]);
   const recent = orders.slice(0, 8);
 
+  // Comparativo: últimos 7 dias × 7 dias anteriores (GMV e receita).
+  const compare = useMemo(() => {
+    const dayKey = (offset: number) => {
+      const d = new Date();
+      d.setDate(d.getDate() - offset);
+      return d.toISOString().slice(0, 10);
+    };
+    const cur = new Set(Array.from({ length: 7 }, (_, i) => dayKey(i)));
+    const prev = new Set(Array.from({ length: 7 }, (_, i) => dayKey(i + 7)));
+    let curGmv = 0, prevGmv = 0, curRev = 0, prevRev = 0;
+    for (const d of fin.byDay) {
+      if (cur.has(d.date)) { curGmv += d.gmv; curRev += d.revenue; }
+      else if (prev.has(d.date)) { prevGmv += d.gmv; prevRev += d.revenue; }
+    }
+    const pct = (a: number, b: number) => (b > 0 ? Math.round(((a - b) / b) * 100) : null);
+    return { gmvDelta: pct(curGmv, prevGmv), revDelta: pct(curRev, prevRev) };
+  }, [fin]);
+
+  const deltaHint = (delta: number | null, base: string) =>
+    delta === null ? base : `${base} · ${delta >= 0 ? '▲' : '▼'} ${Math.abs(delta)}% vs sem. anterior`;
+
+  // Alertas proativos de operação (estilo iFood Gestor).
+  const opsAlerts = useMemo(() => {
+    const out: { text: string; to: string }[] = [];
+    const total = orders.length || 1;
+    const cancelled = orders.filter((o) => o.status === 'cancelled').length;
+    const cancelRate = Math.round((cancelled / total) * 100);
+    if (cancelRate >= 10) out.push({ text: `Taxa de cancelamento em ${cancelRate}% — investigue as causas`, to: '/pedidos' });
+    const stuckPayments = orders.filter(
+      (o) => (o.paymentMethod === 'pix' || o.paymentMethod === 'card_online') && (o.paymentStatus || o.payment?.status) === 'pending' && o.status !== 'cancelled',
+    ).length;
+    if (stuckPayments >= 3) out.push({ text: `${stuckPayments} pedidos aguardando pagamento online — possível atrito no checkout`, to: '/pedidos' });
+    if (driversPending > 0) out.push({ text: `${driversPending} entregador(es) aguardando aprovação de cadastro`, to: '/entregadores' });
+    if (storesPending > 0) out.push({ text: `${storesPending} loja(s) aguardando aprovação`, to: '/lojas' });
+    if (liveOrders.length > 0 && onlineDrivers.length === 0) out.push({ text: 'Pedidos ativos SEM entregadores online agora', to: '/mapa' });
+    return out;
+  }, [orders, driversPending, storesPending, liveOrders.length, onlineDrivers.length]);
+
   return (
     <Page>
       <PageHeader
@@ -113,10 +151,25 @@ export default function Dashboard() {
         </Link>
       )}
 
-      {/* KPIs */}
+      {/* Alertas proativos */}
+      {opsAlerts.length > 0 && (
+        <div className="space-y-2 mb-5">
+          {opsAlerts.map((a, i) => (
+            <Link key={i} to={a.to} className="block">
+              <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-warn-soft border-2 border-warn/20 text-amber-700">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span className="font-bold text-sm flex-1">{a.text}</span>
+                <ArrowRight className="w-4 h-4" />
+              </div>
+            </Link>
+          ))}
+        </div>
+      )}
+
+      {/* KPIs (com comparativo vs semana anterior) */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        <Stat label="GMV (período)" value={brlCompact(fin.gmv)} icon={<Wallet className="w-5 h-5" />} tone="brand" hint={`${num(fin.ordersCount)} pedidos`} />
-        <Stat label="Receita plataforma" value={brlCompact(fin.platformRevenue)} icon={<TrendingUp className="w-5 h-5" />} tone="indigo" hint={`ticket méd. ${brl(fin.avgTicket)}`} />
+        <Stat label="GMV (período)" value={brlCompact(fin.gmv)} icon={<Wallet className="w-5 h-5" />} tone="brand" hint={deltaHint(compare.gmvDelta, `${num(fin.ordersCount)} pedidos`)} />
+        <Stat label="Receita plataforma" value={brlCompact(fin.platformRevenue)} icon={<TrendingUp className="w-5 h-5" />} tone="indigo" hint={deltaHint(compare.revDelta, `ticket méd. ${brl(fin.avgTicket)}`)} />
         <Stat label="Entregadores online" value={num(onlineDrivers.length)} icon={<Bike className="w-5 h-5" />} tone="blue" hint={`${num(drivers.length)} no total`} />
         <Stat label="Tickets abertos" value={num(ticketsOpen)} icon={<LifeBuoy className="w-5 h-5" />} tone="amber" hint={`${num(urgentTickets.length)} urgentes`} />
       </div>

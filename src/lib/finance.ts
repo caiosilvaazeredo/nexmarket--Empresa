@@ -68,10 +68,11 @@ export function computeFinance(orders: Order[], feeFor: FeeResolver): FinanceSum
     if (!isValidForGmv(o)) continue;
 
     const total = o.total || 0;
-    const subtotal = o.subtotal ?? Math.max(0, total - (o.deliveryFee || 0));
+    const subtotal = o.subtotal ?? Math.max(0, total - (o.deliveryFee || 0) - (o.tip || 0));
     const { commissionPct, fixedFee } = feeFor(o.supermarketId);
     const commission = (subtotal * commissionPct) / 100 + fixedFee;
-    const driverEarn = o.driverEarnings || 0;
+    // Gorjeta é 100% do entregador — nunca entra na comissão da plataforma.
+    const driverEarn = (o.driverEarnings || 0) + (o.tip || 0);
 
     gmv += total;
     ordersCount += 1;
