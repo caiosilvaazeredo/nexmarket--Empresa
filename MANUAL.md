@@ -145,6 +145,9 @@ As chaves ficam em **Dashboard Stripe → Developers → API keys**.
 | POST | `/api/payments/tip-checkout` | gorjeta pós-entrega via Checkout |
 | POST | `/api/payments/item-refund` | reembolso self-service por item (cliente), com teto automático |
 | POST | `/api/notifications/send` | relay de push Expo (notificações transacionais) |
+| POST | `/api/payments/wallet/:provider` | cobrança **PicPay/NuPay** (QR + link para o app da carteira) |
+| GET | `/api/payments/wallet/:provider/status` | status/conciliação da carteira |
+| POST | `/api/webhooks/picpay` | callback do PicPay (valida `x-seller-token`) |
 | POST | `/api/webhooks/stripe` | webhook da Stripe |
 | POST | `/api/connect/account-link` | onboarding Connect do entregador |
 | GET | `/api/connect/status` | status da conta Connect |
@@ -154,6 +157,21 @@ Todos os endpoints `/api/*` (exceto webhook) exigem `Authorization: Bearer <Fire
 
 Variáveis opcionais do servidor: `SELF_REFUND_LIMIT_BRL` (teto do reembolso
 automático, padrão 50) e `MAX_TIP_BRL` (teto de gorjeta, padrão 200).
+
+### Carteiras BR: PicPay e NuPay
+
+Os apps consultam `GET /config` e **só exibem as carteiras habilitadas** —
+sem credenciais, nada muda para o usuário.
+
+- **PicPay**: gere o `x-picpay-token` e o *seller token* no painel do lojista
+  PicPay e preencha `PICPAY_TOKEN`/`PICPAY_SELLER_TOKEN`. O servidor cria a
+  cobrança (QR + link), o callback (`/api/webhooks/picpay`) concilia e o
+  **estorno do painel roteia automaticamente para o PicPay** quando o pedido
+  foi pago lá.
+- **NuPay (Nubank)**: a oferta para e-commerce exige credenciamento comercial
+  (direto com o Nubank ou via PSP parceiro). A integração está pronta como
+  "costura": preencha `NUPAY_API_URL`/`NUPAY_API_KEY` do parceiro e ajuste o
+  contrato em `server/index.js` (bloco NuPay) se o esquema do PSP divergir.
 
 ### Estado do PIX na conta
 

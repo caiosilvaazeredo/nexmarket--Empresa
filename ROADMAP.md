@@ -22,6 +22,9 @@ Legenda: ✅ implementado · 🟡 parcial (base pronta, falta evolução) · ⬜
 |---|---|---|---|
 | 5 | Cartão salvo (1 toque, `setup_future_usage`) | ✅ | Checkout salva o cartão no Stripe Customer; pagamento off-session com fallback 3DS; gestão no Perfil |
 | 5b | Apple Pay / Google Pay | ✅ | Ativos na conta Stripe (aparecem no Checkout hospedado) + botão nativo in-app via `@stripe/stripe-react-native` (requer dev build; Apple exige Merchant ID no Apple Developer) |
+| 5c | PicPay | 🟡 | Integração completa (cobrança/QR/status/webhook/estorno) — falta o token do lojista PicPay (`PICPAY_TOKEN`); a opção só aparece nos apps quando configurado |
+| 5d | NuPay (Nubank) | 🟡 | Costura pronta (mesma interface do PicPay); exige credenciamento comercial/PSP parceiro (`NUPAY_API_URL`/`NUPAY_API_KEY`) |
+| 5e | Login com Google | ✅ | Nos 4 apps: web (popup Firebase) e mobile (expo-auth-session; requer client IDs OAuth no Google Cloud + provider Google habilitado no Firebase Auth) |
 | 6 | Gorjeta ao entregador (checkout + pós-entrega) | ✅ | 100% do valor vai ao entregador (saldo + relatórios); pós-entrega paga em 1 toque ou Checkout |
 | 7 | Pedido em grupo / listas recorrentes | ⬜ | Pedido em grupo exige carrinho compartilhado (doc próprio + link web). Listas: reaproveitar `useReorder` + agendamento existente |
 | 8 | Divisão de pagamento | 🟡 | Saldo da carteira + cartão/PIX no mesmo pedido já funciona; split cartão+vale ⬜ |

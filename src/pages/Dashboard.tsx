@@ -33,6 +33,8 @@ import type { Order, DriverProfile, Supermarket, Ticket, PlatformConfig } from '
 const PAYMENT_LABELS: Record<string, string> = {
   pix: 'PIX',
   card_online: 'Cartão online',
+  picpay: 'PicPay',
+  nupay: 'NuPay',
   card_delivery: 'Cartão na entrega',
   cash_delivery: 'Dinheiro',
 };

@@ -152,7 +152,13 @@ app.get('/health', asyncRoute(async (req, res) => {
 }));
 
 app.get('/config', (req, res) => {
-  res.json({ publishableKey: STRIPE_PUBLISHABLE_KEY, currency: CURRENCY, provider: 'stripe' });
+  res.json({
+    publishableKey: STRIPE_PUBLISHABLE_KEY,
+    currency: CURRENCY,
+    provider: 'stripe',
+    // Carteiras adicionais: os apps só exibem as opções habilitadas aqui.
+    wallets: { picpay: !!PICPAY_TOKEN, nupay: NUPAY_CONFIGURED },
+  });
 });
 
 /* ------------------------- Checkout (cartão online) ------------------------ */
@@ -207,6 +213,159 @@ app.post('/api/payments/checkout-session', requireAuth, asyncRoute(async (req, r
   });
 
   res.json({ url: session.url, sessionId: session.id, amount: cents / 100 });
+}));
+
+/* ------------------- Carteiras BR: PicPay e NuPay -------------------------- */
+/**
+ * PicPay: integração direta com a API pública de e-commerce (token do lojista
+ * em PICPAY_TOKEN; o x-seller-token valida o callback e autoriza estornos).
+ * NuPay (Nubank): a oferta oficial para e-commerce passa por credenciamento
+ * comercial/PSP parceiro — a "costura" abaixo fica pronta e responde 501 até
+ * NUPAY_API_URL/NUPAY_API_KEY existirem no ambiente.
+ * Os apps consultam GET /config e só exibem as carteiras habilitadas.
+ */
+const PICPAY_TOKEN = process.env.PICPAY_TOKEN || '';
+const PICPAY_SELLER_TOKEN = process.env.PICPAY_SELLER_TOKEN || '';
+const PICPAY_API = (process.env.PICPAY_API_URL || 'https://appws.picpay.com/ecommerce/public').replace(/\/$/, '');
+const NUPAY_API_URL = (process.env.NUPAY_API_URL || '').replace(/\/$/, '');
+const NUPAY_API_KEY = process.env.NUPAY_API_KEY || '';
+const NUPAY_CONFIGURED = !!(NUPAY_API_URL && NUPAY_API_KEY);
+
+const walletRef = (smId, orderId) => `${smId}--${orderId}`;
+
+async function picpayFetch(path, init = {}) {
+  const res = await fetch(`${PICPAY_API}${path}`, {
+    ...init,
+    headers: { 'Content-Type': 'application/json', 'x-picpay-token': PICPAY_TOKEN, ...(init.headers || {}) },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw Object.assign(new Error(body?.message || `PicPay respondeu ${res.status}.`), { statusCode: res.status >= 500 ? 502 : res.status });
+  }
+  return body;
+}
+
+/** Cria a cobrança na carteira. PicPay exige buyer com CPF. */
+app.post('/api/payments/wallet/:provider', requireAuth, asyncRoute(async (req, res) => {
+  const provider = String(req.params.provider);
+  const { smId, orderId, amount, buyer } = req.body || {};
+  if (!smId || !orderId) return res.status(400).json({ error: 'smId e orderId são obrigatórios.' });
+  const { cents } = await resolveAmount({ smId, orderId, amount });
+
+  if (provider === 'picpay') {
+    if (!PICPAY_TOKEN) {
+      return res.status(501).json({ error: 'PicPay não está configurado (defina PICPAY_TOKEN no servidor).', walletUnavailable: true });
+    }
+    if (!buyer?.document) {
+      return res.status(400).json({ error: 'Informe o CPF do comprador para pagar com PicPay.', cpfRequired: true });
+    }
+    const payment = await picpayFetch('/payments', {
+      method: 'POST',
+      body: JSON.stringify({
+        referenceId: walletRef(smId, orderId),
+        callbackUrl: `${PUBLIC_URL}/api/webhooks/picpay`,
+        returnUrl: `${PUBLIC_URL}/return/success`,
+        value: cents / 100,
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+        buyer: {
+          firstName: buyer.firstName || 'Cliente',
+          lastName: buyer.lastName || 'Nexmarket',
+          document: String(buyer.document),
+          email: buyer.email || req.user.email || '',
+          phone: buyer.phone || '',
+        },
+      }),
+    });
+    return res.json({
+      provider,
+      paymentUrl: payment.paymentUrl,
+      qrContent: payment.qrcode?.content || null,
+      qrBase64: payment.qrcode?.base64 || null,
+      expiresAt: payment.expiresAt || null,
+    });
+  }
+
+  if (provider === 'nupay') {
+    if (!NUPAY_CONFIGURED) {
+      return res.status(501).json({
+        error: 'NuPay requer credenciamento junto ao Nubank/PSP parceiro. Configure NUPAY_API_URL e NUPAY_API_KEY.',
+        walletUnavailable: true,
+      });
+    }
+    // Contrato genérico de PSP — ajuste os campos ao parceiro credenciado.
+    const r = await fetch(`${NUPAY_API_URL}/v1/checkouts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${NUPAY_API_KEY}` },
+      body: JSON.stringify({
+        merchantOrderReference: walletRef(smId, orderId),
+        amount: { value: cents, currency: 'BRL' },
+        returnUrl: `${PUBLIC_URL}/return/success`,
+        webhookUrl: `${PUBLIC_URL}/api/webhooks/nupay`,
+      }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      return res.status(502).json({ error: body?.message || `NuPay respondeu ${r.status}.` });
+    }
+    return res.json({ provider, paymentUrl: body.paymentUrl || body.url || null, qrContent: body.qrCode || null, qrBase64: null, expiresAt: body.expiresAt || null });
+  }
+
+  res.status(404).json({ error: 'Carteira desconhecida.' });
+}));
+
+/** Consulta o status da cobrança na carteira e concilia o pedido. */
+app.get('/api/payments/wallet/:provider/status', requireAuth, asyncRoute(async (req, res) => {
+  const provider = String(req.params.provider);
+  const { smId, orderId } = req.query;
+  if (!smId || !orderId) return res.status(400).json({ error: 'Informe smId e orderId.' });
+
+  if (provider === 'picpay') {
+    if (!PICPAY_TOKEN) return res.status(501).json({ error: 'PicPay não configurado.', walletUnavailable: true });
+    const st = await picpayFetch(`/payments/${walletRef(smId, orderId)}/status`);
+    const paid = st.status === 'paid' || st.status === 'completed';
+    if (paid && firestoreEnabled) {
+      await markOrderPaid({ smId: String(smId), orderId: String(orderId), provider: 'picpay', authorizationId: st.authorizationId, method: 'picpay' });
+    }
+    return res.json({ status: st.status, paid, authorizationId: st.authorizationId || null });
+  }
+
+  if (provider === 'nupay') {
+    if (!NUPAY_CONFIGURED) return res.status(501).json({ error: 'NuPay não configurado.', walletUnavailable: true });
+    const r = await fetch(`${NUPAY_API_URL}/v1/checkouts/${walletRef(smId, orderId)}`, {
+      headers: { Authorization: `Bearer ${NUPAY_API_KEY}` },
+    });
+    const body = await r.json().catch(() => ({}));
+    const paid = ['paid', 'completed', 'approved'].includes(String(body.status || '').toLowerCase());
+    if (paid && firestoreEnabled) {
+      await markOrderPaid({ smId: String(smId), orderId: String(orderId), provider: 'nupay', method: 'nupay' });
+    }
+    return res.json({ status: body.status || 'unknown', paid });
+  }
+
+  res.status(404).json({ error: 'Carteira desconhecida.' });
+}));
+
+/** Callback do PicPay: valida o seller token e concilia via consulta de status. */
+app.post('/api/webhooks/picpay', express.json(), asyncRoute(async (req, res) => {
+  if (PICPAY_SELLER_TOKEN && req.headers['x-seller-token'] !== PICPAY_SELLER_TOKEN) {
+    return res.status(401).json({ error: 'x-seller-token inválido.' });
+  }
+  const referenceId = req.body?.referenceId || '';
+  const [smId, orderId] = String(referenceId).split('--');
+  if (smId && orderId && PICPAY_TOKEN) {
+    try {
+      const st = await picpayFetch(`/payments/${referenceId}/status`);
+      if ((st.status === 'paid' || st.status === 'completed') && firestoreEnabled) {
+        await markOrderPaid({ smId, orderId, provider: 'picpay', authorizationId: st.authorizationId, method: 'picpay' });
+      }
+      if ((st.status === 'refunded' || st.status === 'chargeback') && firestoreEnabled) {
+        await markOrderRefunded({ smId, orderId, amount: 0 });
+      }
+    } catch (e) {
+      console.error('[picpay webhook]', e.message);
+    }
+  }
+  res.json({ received: true });
 }));
 
 /* -------------------- Apple Pay / Google Pay (in-app) ---------------------- */
@@ -525,12 +684,33 @@ app.post('/api/payments/refund', requireAuth, asyncRoute(async (req, res) => {
     return res.status(403).json({ error: 'Apenas operadores da plataforma ou o dono da loja podem estornar.' });
   }
 
-  // Descobre o PaymentIntent: corpo da requisição ou o registrado no pedido.
+  // Descobre o meio de pagamento: corpo da requisição ou o registrado no pedido.
   let pi = paymentIntentId;
-  if (!pi && firestoreEnabled) {
+  let walletProvider = req.body?.provider;
+  let picpayAuth = req.body?.authorizationId;
+  if (firestoreEnabled) {
     const order = await getOrder(smId, orderId);
-    pi = order?.payment?.paymentIntentId;
+    pi = pi || order?.payment?.paymentIntentId;
+    walletProvider = walletProvider || order?.payment?.provider;
+    picpayAuth = picpayAuth || order?.payment?.authorizationId;
   }
+
+  // Estorno via PicPay (o pedido foi pago na carteira, não na Stripe).
+  if (walletProvider === 'picpay') {
+    if (!PICPAY_TOKEN) {
+      return res.status(501).json({ error: 'PicPay não configurado para estornos.', walletUnavailable: true });
+    }
+    const refund = await picpayFetch(`/payments/${walletRef(smId, orderId)}/refunds`, {
+      method: 'POST',
+      headers: PICPAY_SELLER_TOKEN ? { 'x-seller-token': PICPAY_SELLER_TOKEN } : {},
+      body: JSON.stringify(picpayAuth ? { authorizationId: picpayAuth } : {}),
+    });
+    if (firestoreEnabled) {
+      await markOrderRefunded({ smId, orderId, amount: Number(amount) || 0, refundId: refund?.refundId || 'picpay', actorUid: req.user.uid, reason });
+    }
+    return res.json({ ok: true, provider: 'picpay', refundId: refund?.refundId || 'picpay', amount: Number(amount) || 0, status: refund?.status || 'refunded' });
+  }
+
   if (!pi) {
     return res.status(400).json({
       error: 'Pedido sem PaymentIntent da Stripe associado (pagamento não-online ou anterior à integração).',

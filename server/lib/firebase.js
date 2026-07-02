@@ -109,17 +109,18 @@ export async function getOrder(smId, orderId) {
 }
 
 /** Marca o pedido como pago (idempotente) — chamado pelo webhook e pelo /status. */
-export async function markOrderPaid({ smId, orderId, paymentIntentId, sessionId, method }) {
+export async function markOrderPaid({ smId, orderId, paymentIntentId, sessionId, method, provider, authorizationId }) {
   const ref = orderRef(smId, orderId);
   if (!ref) return false;
   await ref.set(
     {
       paymentStatus: 'paid',
       payment: {
-        provider: 'stripe',
+        provider: provider || 'stripe',
         status: 'paid',
         ...(paymentIntentId ? { paymentIntentId } : {}),
         ...(sessionId ? { checkoutSessionId: sessionId } : {}),
+        ...(authorizationId ? { authorizationId } : {}),
         ...(method ? { method } : {}),
         paidAt: FieldValue.serverTimestamp(),
       },
