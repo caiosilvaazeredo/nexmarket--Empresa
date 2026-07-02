@@ -38,6 +38,7 @@ import {
   DEFAULT_FIXED_FEE,
 } from '../lib/finance';
 import { settlementStatusBadge, payoutStatusBadge } from '../lib/status';
+import { gatewayPayout, paymentsGatewayConfigured } from '../lib/payments';
 import { brl, brlCompact, num, timeAgo, formatDate } from '../lib/format';
 import type { Order, Supermarket, DriverProfile, PlatformConfig, Settlement, Payout, PayoutStatus } from '../lib/types';
 
@@ -211,7 +212,7 @@ function Settlements({
       const driverMap = new Map<string, { net: number; count: number }>();
       for (const o of orders) {
         if (o.status === 'cancelled') continue;
-        const subtotal = o.subtotal ?? Math.max(0, (o.total || 0) - (o.deliveryFee || 0));
+        const subtotal = o.subtotal ?? Math.max(0, (o.total || 0) - (o.deliveryFee || 0) - (o.tip || 0));
         const { commissionPct, fixedFee } = feeFor(o.supermarketId);
         const commission = (subtotal * commissionPct) / 100 + fixedFee;
         const s = storeMap.get(o.supermarketId) || { gross: 0, fees: 0, count: 0 };
@@ -221,7 +222,8 @@ function Settlements({
         storeMap.set(o.supermarketId, s);
         if (o.driverId) {
           const d = driverMap.get(o.driverId) || { net: 0, count: 0 };
-          d.net += o.driverEarnings || 0;
+          // frete + gorjeta (a gorjeta é integral do entregador)
+          d.net += (o.driverEarnings || 0) + (o.tip || 0);
           d.count += 1;
           driverMap.set(o.driverId, d);
         }
@@ -331,6 +333,34 @@ function Payouts({ payouts, canSettle }: { payouts: Payout[]; canSettle: boolean
       });
       if (!ok) return;
     }
+
+    // Aprovação: com o servidor de pagamentos configurado o dinheiro sai de
+    // verdade via Stripe Connect; sem Connect (ou entregador sem onboarding)
+    // cai no fluxo manual (PIX fora da plataforma) após confirmação.
+    if (status === 'paid' && p.driverId) {
+      try {
+        if (await paymentsGatewayConfigured()) {
+          await gatewayPayout({ driverId: p.driverId, amount: p.amount, payoutId: p.id });
+          await setPayoutStatus(p, 'paid', 'Pago via Stripe Connect');
+          toast('Repasse enviado via Stripe Connect.', 'success');
+          return;
+        }
+      } catch (e: any) {
+        if (e?.connectUnavailable) {
+          const ok = await confirm({
+            title: 'Entregador sem Stripe Connect',
+            message:
+              'Este entregador ainda não concluiu o cadastro de recebimento no Stripe. Marcar o saque como pago manualmente (ex.: PIX feito fora da plataforma)?',
+            confirmLabel: 'Marcar como pago',
+          });
+          if (!ok) return;
+        } else {
+          toast(`Falha no repasse via Stripe: ${e?.message || e}`, 'error');
+          return;
+        }
+      }
+    }
+
     await setPayoutStatus(p, status);
     toast('Saque atualizado.', 'success');
   };

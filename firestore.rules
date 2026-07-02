@@ -82,6 +82,11 @@ service cloud.firestore {
     match /{path=**}/payouts/{payoutId} {
       allow read: if isAdmin();
     }
+    // Catálogo é público por loja; a leitura em collection-group habilita a
+    // busca multi-loja ("em quais lojas tem leite?") do app do cliente.
+    match /{path=**}/products/{productId} {
+      allow read: if true;
+    }
 
     /* ============================ ADMIN COLLECTIONS =========================== */
 
@@ -132,9 +137,10 @@ service cloud.firestore {
       allow read, create, update, delete: if isAdmin();
     }
 
-    // Platform configuration (fees, integrations).
+    // Platform configuration (fees, integrations). O doc 'public' expõe apenas
+    // parâmetros que os apps clientes precisam ler (ex.: % de cashback).
     match /platformConfig/{docId} {
-      allow read: if isAdmin();
+      allow read: if docId == 'public' || isAdmin();
       allow write: if isMasterAdmin();
     }
 
@@ -354,7 +360,8 @@ service cloud.firestore {
                 'deliveryStatus', 'driverId', 'driverName', 'driverLocation', 'driverEarnings',
                 'acceptedAt', 'pickedUpAt', 'deliveredAt', 'proofOfDelivery', 'problemReport',
                 'deliveryAddress', 'customerName', 'customerPhone', 'deliveryFee',
-                'fulfillment', 'paymentMethod', 'paymentStatus', 'scheduledFor', 'changeFor', 'notes',
+                'fulfillment', 'paymentMethod', 'paymentStatus', 'payment', 'tip', 'tipPendingCredit',
+                'cashbackCredited', 'scheduledFor', 'changeFor', 'notes',
                 'rating', 'ratingComment', 'ratingTags', 'ratingPhotoUrl'
             ])
             && (

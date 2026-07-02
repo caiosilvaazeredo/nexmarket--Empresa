@@ -1,5 +1,7 @@
 # 🛡️ Nexmarket · Painel Administrativo (Empresa)
 
+> 📘 **[MANUAL.md](./MANUAL.md)** — como rodar, buildar e publicar o painel e o **servidor de pagamentos Stripe** (`server/`).
+
 **Backoffice** da plataforma **Nexmarket** — o sistema interno usado pelos
 **funcionários** (Atendimento, Financeiro, Compliance e Administradores) para
 operar toda a plataforma de delivery de supermercados, no estilo *iFood / Uber
