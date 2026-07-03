@@ -135,6 +135,24 @@ async function assertOwnPaymentMethod(user, paymentMethodId) {
 
 /* ------------------------------- Diagnóstico ------------------------------- */
 
+// Página de status na raiz — este é um servidor de API; as rotas úteis estão
+// documentadas no MANUAL.md do repositório nexmarket--Empresa.
+app.get('/', (req, res) => {
+  res.type('html').send(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Nexmarket · Servidor de Pagamentos</title>
+<style>body{font-family:system-ui,sans-serif;background:#F0FDF4;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+.card{background:#fff;border:2px solid #DCFCE7;border-radius:20px;padding:32px;max-width:460px;box-shadow:0 8px 30px rgba(0,0,0,.06)}
+h1{font-size:20px;color:#14532D;margin:0 0 8px}p{color:#475569;margin:0 0 12px;font-size:14px}
+code{background:#F1F5F9;padding:2px 6px;border-radius:6px;font-size:13px}
+.ok{display:inline-block;background:#DCFCE7;color:#166534;font-weight:700;border-radius:999px;padding:4px 12px;font-size:13px;margin-bottom:12px}</style></head>
+<body><div class="card"><span class="ok">● online</span>
+<h1>⚡ Nexmarket — Servidor de Pagamentos</h1>
+<p>API interna da plataforma (Stripe, PicPay, push). Não há interface web aqui — quem usa este serviço são os apps Cliente, Loja, Entregador e o painel Empresa.</p>
+<p>Diagnóstico: <a href="/health">/health</a> · Config pública: <a href="/config">/config</a></p>
+<p>Documentação: <code>MANUAL.md</code> no repositório <code>nexmarket--Empresa</code>.</p>
+</div></body></html>`);
+});
+
 app.get('/health', asyncRoute(async (req, res) => {
   const out = {
     ok: true,
