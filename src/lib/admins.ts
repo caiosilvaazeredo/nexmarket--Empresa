@@ -14,9 +14,10 @@ import { db } from './firebase';
 import type { AdminProfile, AdminInvite, AdminRole } from './types';
 
 /**
- * The root super-admin email bootstraps the very first operator. It is also
- * baked into firestore.rules so the panel works on a brand-new project without
- * any manual console step. Keep both in sync.
+ * The root super-admin email is also baked into firestore.rules and into the
+ * shared auth backend (server/index.js — /api/auth/register). Kept here only
+ * for display purposes; actual bootstrap (root → master, invite → role)
+ * happens server-side at registration time, not in the client anymore.
  */
 export const ROOT_ADMIN_EMAIL = (
   import.meta.env.VITE_ROOT_ADMIN_EMAIL || 'caiosazeredo@cos.ufrj.br'
@@ -36,73 +37,19 @@ export async function getAdmin(uid: string): Promise<AdminProfile | null> {
 }
 
 /**
- * Resolve whether the signed-in Firebase user may use the panel, creating the
- * admin profile when bootstrapping (root email) or accepting an invite.
- * Returns the AdminProfile when access is granted, or null otherwise.
+ * Resolve whether the signed-in user may use the panel. The admin profile
+ * (admins/{uid}) is created by the shared auth backend during registration —
+ * this only READS it and bumps lastLoginAt; it no longer bootstraps/writes
+ * new admin docs client-side (that would require request.auth.token.email,
+ * which Custom Token sessions don't carry).
  */
 export async function resolveAdminAccess(user: User): Promise<AdminProfile | null> {
-  const email = (user.email || '').toLowerCase();
-
-  // 1) Existing, active admin.
   const existing = await getAdmin(user.uid);
   if (existing && existing.active) {
     updateDoc(adminRef(user.uid), { lastLoginAt: serverTimestamp() }).catch(() => {});
     return existing;
   }
-  if (existing && !existing.active) return null; // deactivated
-
-  // 2) Root bootstrap → master.
-  if (isRootEmail(email)) {
-    const profile: AdminProfile = {
-      uid: user.uid,
-      name: user.displayName || 'Administrador',
-      email,
-      role: 'master',
-      active: true,
-      photoUrl: user.photoURL || '',
-    };
-    await setDoc(
-      adminRef(user.uid),
-      {
-        name: profile.name,
-        email: profile.email,
-        role: 'master',
-        active: true,
-        photoUrl: profile.photoUrl || '',
-        createdBy: 'root',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-        lastLoginAt: serverTimestamp(),
-      },
-      { merge: true },
-    );
-    return profile;
-  }
-
-  // 3) Pending invite for this email → create profile from invite.
-  if (email) {
-    const inviteSnap = await getDoc(doc(db, 'adminInvites', email));
-    if (inviteSnap.exists()) {
-      const invite = inviteSnap.data() as AdminInvite;
-      const role: AdminRole = invite.role || 'viewer';
-      await setDoc(adminRef(user.uid), {
-        name: user.displayName || email.split('@')[0],
-        email,
-        role,
-        active: true,
-        photoUrl: user.photoURL || '',
-        createdBy: invite.invitedBy || 'invite',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-        lastLoginAt: serverTimestamp(),
-      });
-      // Consume the invite (best-effort).
-      deleteDoc(doc(db, 'adminInvites', email)).catch(() => {});
-      return { uid: user.uid, name: user.displayName || email, email, role, active: true };
-    }
-  }
-
-  return null;
+  return null; // no doc yet, or deactivated
 }
 
 export function subscribeAdmins(cb: (admins: AdminProfile[]) => void) {

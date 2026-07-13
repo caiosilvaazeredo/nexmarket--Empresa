@@ -1,13 +1,5 @@
 import { initializeApp } from 'firebase/app';
-import {
-  getAuth,
-  GoogleAuthProvider,
-  signInWithPopup,
-  signOut,
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
-  sendPasswordResetEmail,
-} from 'firebase/auth';
+import { getAuth, signInWithCustomToken, signOut } from 'firebase/auth';
 import { getFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 import firebaseConfig from '../../firebase-applet-config.json';
@@ -18,21 +10,46 @@ export const auth = getAuth(app);
 export const db = getFirestore(app, (firebaseConfig as any).firestoreDatabaseId);
 export const storage = getStorage(app, `gs://${(firebaseConfig as any).storageBucket}`);
 
-export const googleProvider = new GoogleAuthProvider();
+/* -------------------------- Auth helpers -------------------------- *
+ * Login/senha NÃO usam os provedores nativos do Firebase (nem e-mail/senha
+ * nativo, nem Google) — vivem no Firestore, validados pelo backend
+ * compartilhado (pasta server/ deste repositório), que emite um Firebase
+ * Custom Token. O Firebase Auth aqui só mantém a sessão (request.auth
+ * continua populado para as Security Rules). */
 
-export const loginWithGoogle = async () => {
-  const result = await signInWithPopup(auth, googleProvider);
-  return result.user;
+const AUTH_API_URL = (import.meta.env.VITE_AUTH_API_URL || 'http://localhost:8787').replace(/\/$/, '');
+
+async function requestCustomToken(path: string, body: Record<string, unknown>) {
+  const res = await fetch(`${AUTH_API_URL}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || 'Falha na autenticação.');
+  return data as { customToken: string; uid: string };
+}
+
+export const loginWithEmail = async (email: string, pass: string) => {
+  const { customToken } = await requestCustomToken('/api/auth/login', {
+    app: 'empresa',
+    email,
+    password: pass,
+  });
+  return (await signInWithCustomToken(auth, customToken)).user;
 };
 
-export const loginWithEmail = async (email: string, pass: string) =>
-  (await signInWithEmailAndPassword(auth, email, pass)).user;
-
-export const registerWithEmail = async (email: string, pass: string) =>
-  (await createUserWithEmailAndPassword(auth, email, pass)).user;
-
-export const resetPassword = async (email: string) =>
-  sendPasswordResetEmail(auth, email);
+/** Só funciona para o e-mail root ou para um e-mail com convite pendente
+ * (validado no servidor) — mantém o painel "acesso restrito". */
+export const registerWithEmail = async (email: string, pass: string, name?: string) => {
+  const { customToken } = await requestCustomToken('/api/auth/register', {
+    app: 'empresa',
+    email,
+    password: pass,
+    profile: { name },
+  });
+  return (await signInWithCustomToken(auth, customToken)).user;
+};
 
 export const logout = async () => {
   try {

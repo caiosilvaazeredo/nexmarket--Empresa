@@ -1,15 +1,15 @@
 import { useState } from 'react';
-import { Store, Mail, Lock, ShieldCheck, ArrowLeft } from 'lucide-react';
-import { loginWithEmail, loginWithGoogle, resetPassword } from '../lib/firebase';
+import { Store, Mail, Lock, ShieldCheck, User as UserIcon, ArrowLeft } from 'lucide-react';
+import { loginWithEmail, registerWithEmail } from '../lib/firebase';
 import { Button } from '../components/ui/Button';
 
 export default function Login() {
-  const [view, setView] = useState<'login' | 'recovery'>('login');
+  const [view, setView] = useState<'login' | 'register'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -17,35 +17,21 @@ export default function Login() {
     setError(null);
     try {
       await loginWithEmail(email, password);
-    } catch {
-      setError('Credenciais inválidas. Verifique seu e-mail e senha.');
+    } catch (err: any) {
+      setError(err?.message || 'Credenciais inválidas. Verifique seu e-mail e senha.');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleGoogle = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      await loginWithGoogle();
-    } catch {
-      setError('Não foi possível entrar com o Google.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleRecovery = async (e: React.FormEvent) => {
+  const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
     setError(null);
-    setSuccess(null);
     try {
-      await resetPassword(email);
-      setSuccess('Link de recuperação enviado para o seu e-mail.');
-    } catch {
-      setError('Erro ao enviar o link. Verifique o e-mail.');
+      await registerWithEmail(email, password, name);
+    } catch (err: any) {
+      setError(err?.message || 'Não foi possível criar o acesso.');
     } finally {
       setLoading(false);
     }
@@ -75,11 +61,6 @@ export default function Login() {
             {error}
           </div>
         )}
-        {success && (
-          <div className="p-4 mb-6 bg-green-50 text-green-600 rounded-xl font-medium text-sm text-center border-2 border-green-100">
-            {success}
-          </div>
-        )}
 
         {view === 'login' ? (
           <div className="space-y-6 animate-nex-in">
@@ -92,34 +73,14 @@ export default function Login() {
                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
                 <input type="password" required value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Sua senha" className={inputCls} />
               </div>
-              <div className="flex justify-end">
-                <button type="button" onClick={() => setView('recovery')} className="text-sm font-bold text-brand-dark hover:underline">
-                  Esqueceu a senha?
-                </button>
-              </div>
               <Button className="w-full" size="lg" disabled={loading}>
                 {loading ? 'Entrando…' : 'Entrar no painel'}
               </Button>
             </form>
 
-            <div className="relative flex items-center">
-              <div className="flex-grow border-t border-slate-200" />
-              <span className="mx-4 text-slate-400 text-sm font-medium">ou</span>
-              <div className="flex-grow border-t border-slate-200" />
-            </div>
-
-            <Button variant="secondary" className="w-full" size="lg" onClick={handleGoogle} disabled={loading}>
-              <svg className="w-5 h-5 mr-1" viewBox="0 0 24 24">
-                <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4" />
-                <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
-                <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
-                <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
-              </svg>
-              Entrar com Google
-            </Button>
-
             <p className="text-center text-slate-400 text-xs font-medium">
-              Acesso restrito a operadores autorizados. Novos acessos são liberados por um administrador master.
+              Esqueceu a senha? Peça a um administrador master para redefini-la em
+              Operadores. Tem um convite? <button type="button" onClick={() => setView('register')} className="text-brand-dark font-bold hover:underline">Criar acesso</button>.
             </p>
           </div>
         ) : (
@@ -127,14 +88,25 @@ export default function Login() {
             <button onClick={() => setView('login')} className="flex items-center gap-1 text-slate-400 hover:text-slate-600 font-bold text-sm">
               <ArrowLeft className="w-4 h-4" /> Voltar
             </button>
-            <p className="text-slate-600 font-medium">Informe seu e-mail para receber um link de redefinição de senha.</p>
-            <form onSubmit={handleRecovery} className="space-y-3">
+            <p className="text-slate-600 font-medium">
+              Só funciona para o e-mail root ou para um e-mail com convite pendente
+              enviado por um administrador master.
+            </p>
+            <form onSubmit={handleRegister} className="space-y-3">
+              <div className="relative">
+                <UserIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
+                <input type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Seu nome" className={inputCls} />
+              </div>
               <div className="relative">
                 <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
                 <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Seu e-mail" className={inputCls} />
               </div>
+              <div className="relative">
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
+                <input type="password" required minLength={6} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Crie uma senha (mín. 6 caracteres)" className={inputCls} />
+              </div>
               <Button className="w-full" size="lg" disabled={loading}>
-                {loading ? 'Enviando…' : 'Enviar link'}
+                {loading ? 'Criando…' : 'Criar acesso'}
               </Button>
             </form>
           </div>
