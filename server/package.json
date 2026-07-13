@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Backend de pagamentos da plataforma Nexmarket (Stripe + Firebase). Único lugar onde a chave SECRETA da Stripe é usada.",
+  "description": "Backend de pagamentos + autenticação da plataforma Nexmarket (Stripe + Firebase). Único lugar onde a chave SECRETA da Stripe é usada; também emite os Custom Tokens de login para loja/empresa/entregador.",
   "main": "index.js",
   "engines": {
     "node": ">=18"
@@ -13,6 +13,7 @@
     "dev": "node --watch index.js"
   },
   "dependencies": {
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.2",

@@ -1,9 +1,10 @@
 /**
- * Nexmarket — Servidor de Pagamentos (Stripe)
+ * Nexmarket — Servidor de Pagamentos (Stripe) + Autenticação compartilhada
  * ============================================
  * Único componente da plataforma que usa a CHAVE SECRETA da Stripe.
  * Atende os quatro apps (cliente, loja, entregador e painel Empresa):
  *
+ *   • POST /api/auth/login · /api/auth/register  → autenticação (loja/empresa/entregador)
  *   • POST /api/payments/checkout-session  → Stripe Checkout (cartão) p/ um pedido
  *   • POST /api/payments/pix-intent        → PaymentIntent PIX (QR + copia-e-cola)
  *   • GET  /api/payments/status            → consulta/concilia o status de um pagamento
@@ -18,6 +19,7 @@
  * em um app cliente ou em repositório.
  */
 import 'dotenv/config';
+import { randomUUID } from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
 import Stripe from 'stripe';
@@ -27,6 +29,7 @@ import {
   isStoreOwner,
   firestoreEnabled,
   db,
+  adminAuth,
   FieldValue,
   getOrder,
   orderRef,
@@ -34,6 +37,7 @@ import {
   markOrderPaymentFailed,
   markOrderRefunded,
 } from './lib/firebase.js';
+import { login as authLogin, createCredential, setPassword as authSetPassword } from './lib/auth.js';
 
 const PORT = Number(process.env.PORT || 8787);
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
@@ -42,6 +46,7 @@ const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 const CURRENCY = (process.env.CURRENCY || 'brl').toLowerCase();
 /** URL pública deste servidor (usada nas páginas de retorno do Checkout). */
 const PUBLIC_URL = (process.env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+const ROOT_ADMIN_EMAIL = (process.env.ROOT_ADMIN_EMAIL || 'caiosazeredo@cos.ufrj.br').toLowerCase();
 
 if (!STRIPE_SECRET_KEY) {
   console.error('[stripe] STRIPE_SECRET_KEY não definida. Configure server/.env antes de iniciar.');
@@ -160,6 +165,73 @@ app.get('/config', (req, res) => {
     wallets: { picpay: !!PICPAY_TOKEN, nupay: NUPAY_CONFIGURED },
   });
 });
+
+/* ------------------------------ Autenticação -------------------------------
+ * Login/senha vivem 100% no Firestore (server/lib/auth.js) — nunca nos
+ * provedores nativos do Firebase (sem e-mail/senha nativo, sem Google). Este
+ * servidor valida a credencial e emite um Firebase Custom Token, trocado no
+ * app por signInWithCustomToken. Usado por loja, empresa e entregador — o
+ * app cliente final continua no Firebase Authentication nativo. */
+
+app.post('/api/auth/login', asyncRoute(async (req, res) => {
+  const { app: appName, email, password } = req.body || {};
+  const { customToken, uid } = await authLogin({ app: appName, email, password, ip: req.ip });
+  res.json({ customToken, uid });
+}));
+
+app.post('/api/auth/register', asyncRoute(async (req, res) => {
+  const { app: appName, email, password, profile } = req.body || {};
+  if (!['empresa', 'loja', 'entregador'].includes(appName)) {
+    return res.status(400).json({ error: 'App inválido.' });
+  }
+  const normEmail = String(email || '').trim().toLowerCase();
+
+  if (appName === 'empresa') {
+    if (!db) return res.status(500).json({ error: 'Servidor sem acesso ao Firestore.' });
+    const isRoot = normEmail === ROOT_ADMIN_EMAIL;
+    const inviteSnap = isRoot ? null : await db.doc(`adminInvites/${normEmail}`).get();
+    if (!isRoot && !inviteSnap?.exists) {
+      return res.status(403).json({
+        error: 'Este e-mail não tem convite pendente. Peça a um administrador master.',
+      });
+    }
+    const uid = randomUUID();
+    await createCredential({ app: appName, email: normEmail, password, uid });
+    const role = isRoot ? 'master' : (inviteSnap.data().role || 'viewer');
+    await db.doc(`admins/${uid}`).set({
+      name: profile?.name || normEmail.split('@')[0],
+      email: normEmail,
+      role,
+      active: true,
+      photoUrl: '',
+      createdBy: isRoot ? 'root' : (inviteSnap.data().invitedBy || 'invite'),
+      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    if (!isRoot) await db.doc(`adminInvites/${normEmail}`).delete().catch(() => {});
+    const customToken = await adminAuth.createCustomToken(uid, { app: appName });
+    return res.json({ customToken, uid });
+  }
+
+  // Loja e Entregador: cadastro aberto — o app cria o próprio perfil
+  // (users/{uid} ou drivers/{uid}) depois do login, como já fazia.
+  const uid = randomUUID();
+  await createCredential({ app: appName, email: normEmail, password, uid });
+  const customToken = await adminAuth.createCustomToken(uid, { app: appName });
+  res.json({ customToken, uid });
+}));
+
+/** Master admin redefine a senha de um operador/lojista/entregador (sem
+ * transporte de e-mail configurado, isto substitui o "esqueci minha senha"
+ * self-service que existia via Firebase Auth). */
+app.post('/api/auth/admin-reset-password', requireAuth, asyncRoute(async (req, res) => {
+  if (!(await isAdminUser(req.user))) {
+    return res.status(403).json({ error: 'Apenas operadores master podem redefinir senhas de terceiros.' });
+  }
+  const { app: appName, email, newPassword } = req.body || {};
+  await authSetPassword({ app: appName, email, newPassword });
+  res.json({ ok: true });
+}));
 
 /* ------------------------- Checkout (cartão online) ------------------------ */
 
