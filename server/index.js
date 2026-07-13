@@ -16,7 +16,9 @@
  *   • GET  /health · GET /config           → diagnóstico e config pública
  *
  * Variáveis de ambiente: ver .env.example. NUNCA exponha STRIPE_SECRET_KEY
- * em um app cliente ou em repositório.
+ * em um app cliente ou em repositório. A chave da Stripe é OPCIONAL: sem ela
+ * o servidor sobe normalmente (autenticação funciona) e apenas as rotas de
+ * pagamento respondem 501.
  */
 import 'dotenv/config';
 import { randomUUID } from 'node:crypto';
@@ -49,11 +51,12 @@ const PUBLIC_URL = (process.env.PUBLIC_URL || `http://localhost:${PORT}`).replac
 const ROOT_ADMIN_EMAIL = (process.env.ROOT_ADMIN_EMAIL || 'caiosazeredo@cos.ufrj.br').toLowerCase();
 
 if (!STRIPE_SECRET_KEY) {
-  console.error('[stripe] STRIPE_SECRET_KEY não definida. Configure server/.env antes de iniciar.');
-  process.exit(1);
+  console.warn('[stripe] STRIPE_SECRET_KEY não definida — rotas de pagamento respondem 501; autenticação (/api/auth/*) funciona normalmente.');
 }
 
-const stripe = new Stripe(STRIPE_SECRET_KEY);
+/** `null` quando a Stripe não está configurada — as rotas de pagamento são
+ * barradas pelo middleware requirePayments antes de chegar a usá-lo. */
+const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 const app = express();
 
 app.use(
@@ -67,6 +70,19 @@ app.use(
 app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), handleWebhook);
 
 app.use(express.json());
+
+/* Sem STRIPE_SECRET_KEY as rotas de pagamento/repasse ficam indisponíveis
+ * (501), mas o restante do servidor — principalmente /api/auth/* — segue no
+ * ar. Registrado antes das rotas para interceptá-las. */
+app.use(['/api/payments', '/api/connect'], (req, res, next) => {
+  if (!stripe) {
+    return res.status(501).json({
+      error: 'Pagamentos indisponíveis: STRIPE_SECRET_KEY não configurada no servidor.',
+      paymentsUnavailable: true,
+    });
+  }
+  next();
+});
 
 const asyncRoute = (fn) => (req, res) => fn(req, res).catch((e) => sendStripeError(res, e));
 
@@ -144,12 +160,12 @@ app.get('/health', asyncRoute(async (req, res) => {
   const out = {
     ok: true,
     service: 'nexmarket-payments',
-    stripe: true,
+    stripe: !!stripe,
     firestoreAdmin: firestoreEnabled,
     webhookConfigured: !!STRIPE_WEBHOOK_SECRET,
     currency: CURRENCY,
   };
-  if (req.query.deep === '1') {
+  if (req.query.deep === '1' && stripe) {
     const balance = await stripe.balance.retrieve();
     out.stripeAccountLive = !!balance.livemode;
   }
@@ -161,6 +177,7 @@ app.get('/config', (req, res) => {
     publishableKey: STRIPE_PUBLISHABLE_KEY,
     currency: CURRENCY,
     provider: 'stripe',
+    paymentsEnabled: !!stripe,
     // Carteiras adicionais: os apps só exibem as opções habilitadas aqui.
     wallets: { picpay: !!PICPAY_TOKEN, nupay: NUPAY_CONFIGURED },
   });
@@ -950,6 +967,9 @@ app.post('/api/notifications/send', requireAuth, asyncRoute(async (req, res) => 
 /* --------------------------------- Webhook -------------------------------- */
 
 async function handleWebhook(req, res) {
+  if (!stripe) {
+    return res.status(501).json({ error: 'Stripe não configurada neste servidor.' });
+  }
   let event = null;
   try {
     if (STRIPE_WEBHOOK_SECRET) {
@@ -1056,5 +1076,5 @@ app.get('/return/cancel', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`⚡ Nexmarket payments server em http://localhost:${PORT}`);
-  console.log(`   Stripe: ${STRIPE_SECRET_KEY.startsWith('sk_test') ? 'TEST mode' : 'LIVE mode'} · Firestore admin: ${firestoreEnabled ? 'ativo' : 'inativo (fallback no cliente)'}`);
+  console.log(`   Stripe: ${stripe ? (STRIPE_SECRET_KEY.startsWith('sk_test') ? 'TEST mode' : 'LIVE mode') : 'NÃO configurada (pagamentos desativados)'} · Firestore admin: ${firestoreEnabled ? 'ativo' : 'inativo (fallback no cliente)'}`);
 });
