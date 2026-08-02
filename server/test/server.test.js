@@ -115,6 +115,62 @@ describe('Páginas de retorno do Checkout', () => {
   });
 });
 
+describe('Identidade e recuperação de senha', () => {
+  test('claim exige autenticação', async () => {
+    const res = await fetch(`${BASE}/api/identity/claim`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ role: 'cliente' }),
+    });
+    assert.equal(res.status, 401);
+  });
+
+  test('forgot-password responde igual para e-mail com ou sem conta', async () => {
+    const call = (email) =>
+      fetch(`${BASE}/api/auth/forgot-password`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email, app: 'cliente' }),
+      }).then((r) => r.json());
+
+    const a = await call('existe@x.com');
+    const b = await call('nao-existe@x.com');
+    // Mesma mensagem: nao revela quais e-mails estao cadastrados.
+    assert.equal(a.message, b.message);
+    assert.equal(a.ok, true);
+  });
+
+  test('forgot-password sem e-mail e recusado', async () => {
+    const res = await fetch(`${BASE}/api/auth/forgot-password`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(res.status, 400);
+  });
+
+  test('token invalido nao abre o formulario', async () => {
+    const res = await fetch(`${BASE}/api/auth/reset-password?token=invalido`);
+    assert.notEqual(res.status, 200);
+  });
+
+  test('pagina de redefinicao abre no navegador', async () => {
+    const res = await fetch(`${BASE}/redefinir-senha?token=abc123`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.match(html, /Criar nova senha/);
+    assert.match(html, /abc123/);
+  });
+
+  test('token com script e sanitizado na pagina (sem XSS)', async () => {
+    const res = await fetch(
+      `${BASE}/redefinir-senha?token=${encodeURIComponent('"><script>alert(1)</script>')}`,
+    );
+    const html = await res.text();
+    assert.ok(!html.includes('<script>alert(1)'));
+  });
+});
+
 describe('Autenticação exigida', () => {
   test('rota protegida sem token não vaza dados', async () => {
     const res = await fetch(`${BASE}/api/auth/admin-reset-password`, {

@@ -18,8 +18,16 @@
  * a esta coleção ao cliente — o `allow read, write: if false;` padrão do
  * firestore.rules cobre. Só este servidor (Admin SDK) enxerga as senhas.
  */
-import bcrypt from 'bcryptjs';
 import { db, adminAuth, FieldValue } from './firebase.js';
+import {
+  assertRole,
+  findIdentity,
+  identityRef,
+  migrateLegacyCredential,
+  registerRole,
+  setIdentityPassword,
+  verifyPassword,
+} from './identity.js';
 
 export const VALID_APPS = ['empresa', 'loja', 'entregador'];
 
@@ -73,6 +81,13 @@ export async function findCredential(appName, email) {
   return snap.exists ? snap.data() : null;
 }
 
+/**
+ * Login de loja/empresa/entregador contra a **identidade unificada**.
+ *
+ * Contas antigas em `staffCredentials/{app}/accounts/{email}` são migradas na
+ * primeira entrada, sem o usuário perceber. O papel é verificado: um e-mail
+ * de entregador não entra no painel da loja, mesmo com a senha certa.
+ */
 export async function login({ app: appName, email, password, ip }) {
   assertApp(appName);
   email = normEmail(email);
@@ -83,51 +98,39 @@ export async function login({ app: appName, email, password, ip }) {
     throw fail('Muitas tentativas. Tente novamente em alguns minutos.', 429);
   }
 
-  const cred = await findCredential(appName, email);
-  if (!cred || cred.active === false) throw fail('Credenciais inválidas.', 401);
+  let identity = await findIdentity(email);
+  if (!identity) identity = await migrateLegacyCredential({ app: appName, email });
+  if (!identity) throw fail('Credenciais inválidas.', 401);
 
-  const ok = await bcrypt.compare(password, cred.passwordHash);
+  const ok = await verifyPassword(identity, password);
   if (!ok) throw fail('Credenciais inválidas.', 401);
 
+  // Senha correta, mas conta sem este papel: mensagem clara em vez de 401.
+  assertRole(identity, appName);
+
   resetRateLimit(rlKey);
-  await credentialRef(appName, email)
+  await identityRef(email)
     .set({ lastLoginAt: FieldValue.serverTimestamp() }, { merge: true })
     .catch(() => {});
 
-  const customToken = await adminAuth.createCustomToken(cred.uid, { app: appName });
-  return { customToken, uid: cred.uid };
-}
-
-export async function createCredential({ app: appName, email, password, uid }) {
-  assertApp(appName);
-  email = normEmail(email);
-  if (!email || !password || password.length < 6) {
-    throw fail('E-mail válido e senha com ao menos 6 caracteres são obrigatórios.', 400);
-  }
-  const ref = credentialRef(appName, email);
-  const existing = await ref.get();
-  if (existing.exists) throw fail('Já existe uma conta com este e-mail.', 409);
-
-  const passwordHash = await bcrypt.hash(password, 12);
-  await ref.set({
-    uid,
-    passwordHash,
-    active: true,
-    createdAt: FieldValue.serverTimestamp(),
-    updatedAt: FieldValue.serverTimestamp(),
+  const customToken = await adminAuth.createCustomToken(identity.uid, {
+    app: appName,
+    roles: identity.roles || {},
   });
+  return { customToken, uid: identity.uid, roles: identity.roles || {} };
 }
 
-export async function setPassword({ app: appName, email, newPassword }) {
+/**
+ * Cadastro: cria (ou acumula) o papel na identidade unificada e devolve o uid
+ * canônico — o mesmo que a pessoa já usa nos outros apps.
+ */
+export async function createCredential({ app: appName, email, password, displayName }) {
   assertApp(appName);
-  email = normEmail(email);
-  if (!newPassword || newPassword.length < 6) {
-    throw fail('A nova senha deve ter ao menos 6 caracteres.', 400);
-  }
-  const ref = credentialRef(appName, email);
-  const snap = await ref.get();
-  if (!snap.exists) throw fail('Conta não encontrada.', 404);
+  return registerRole({ email, password, role: appName, displayName });
+}
 
-  const passwordHash = await bcrypt.hash(newPassword, 12);
-  await ref.set({ passwordHash, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+/** Redefine a senha — vale para todos os apps (identidade única). */
+export async function setPassword({ app: appName, email, newPassword }) {
+  if (appName) assertApp(appName);
+  await setIdentityPassword({ email, newPassword });
 }

@@ -202,3 +202,14 @@ STRIPE_SECRET_KEY=sk_test_... npm test  # + integração real (cartão, recusa, 
 
 Os testes de integração são **pulados** sem a chave e **recusam rodar com
 chave de produção** (`sk_live_`).
+
+---
+
+## 👤 Conta única e e-mails transacionais
+
+O mesmo e-mail passa a ser **uma única pessoa** nos quatro apps
+(`identities/{email}`), com papéis acumuláveis e senha única. O disparo de
+e-mails de cadastro e recuperação de senha sai deste servidor via **Resend**.
+
+📘 **[server/GUIA-EMAIL-E-CONTAS.md](./server/GUIA-EMAIL-E-CONTAS.md)** — como
+ligar o e-mail em ~5 minutos e como a identidade unificada funciona.
