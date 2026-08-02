@@ -10,9 +10,22 @@ import {
   Smartphone,
   Building2,
   Save,
+  CalendarClock,
 } from 'lucide-react';
 import { Page, PageHeader } from '../components/layout/PageHeader';
 import { Card, CardHeader } from '../components/ui/Card';
+import {
+  CADENCE_LABELS,
+  DEFAULT_DRIVER_PAYOUT,
+  DEFAULT_STORE_PAYOUT,
+  WEEKDAY_LABELS,
+  describeSchedule,
+  formatDate,
+  nextPayoutDate,
+  sanitizeSchedule,
+  withDefaults,
+} from '../lib/payoutSchedule';
+import type { PayoutCadence, PayoutSchedule } from '../lib/types';
 import { Button } from '../components/ui/Button';
 import { Field, Input } from '../components/ui/Input';
 import { Badge } from '../components/ui/Badge';
@@ -48,6 +61,8 @@ export default function Settings() {
       paymentsProvider: form.paymentsProvider || '',
       paymentsApiUrl: form.paymentsApiUrl || '',
       backgroundCheckApiUrl: form.backgroundCheckApiUrl || '',
+      storePayout: sanitizeSchedule(form.storePayout ?? {}, DEFAULT_STORE_PAYOUT),
+      driverPayout: sanitizeSchedule(form.driverPayout ?? {}, DEFAULT_DRIVER_PAYOUT),
     });
     toast('Configurações salvas.', 'success');
   };
@@ -77,6 +92,31 @@ export default function Settings() {
             <Field label="Cashback ao cliente (%)" hint="Creditado na carteira do cliente a cada pedido entregue (0 desliga).">
               <Input type="number" value={form.cashbackPct ?? ''} onChange={(e) => set({ cashbackPct: Number(e.target.value) })} placeholder="2" />
             </Field>
+          </div>
+        </Card>
+
+        {/* Payout schedule (temporalidade dos pagamentos) */}
+        <Card className="p-5">
+          <CardHeader
+            title="Calendário de pagamentos"
+            subtitle="Quando lojas e entregadores recebem"
+            icon={<CalendarClock className="w-5 h-5 text-brand-dark" />}
+            className="p-0 mb-4"
+          />
+          <div className="space-y-5">
+            <ScheduleEditor
+              title="Lojas parceiras"
+              value={form.storePayout}
+              fallback={DEFAULT_STORE_PAYOUT}
+              onChange={(storePayout) => set({ storePayout })}
+            />
+            <div className="border-t border-slate-100 dark:border-slate-800" />
+            <ScheduleEditor
+              title="Entregadores"
+              value={form.driverPayout}
+              fallback={DEFAULT_DRIVER_PAYOUT}
+              onChange={(driverPayout) => set({ driverPayout })}
+            />
           </div>
         </Card>
 
@@ -236,5 +276,111 @@ function DemoCard() {
         <Button variant="outline" className="flex-1 text-danger" onClick={() => run('clear')} disabled={busy}>Limpar</Button>
       </div>
     </Card>
+  );
+}
+
+
+/* --------------------- Calendário de repasse (temporalidade) --------------- */
+
+/**
+ * Edita quando um lado da plataforma recebe: frequência, dia, carência (D+N),
+ * valor mínimo e se o repasse sai automático pela Stripe Connect.
+ */
+function ScheduleEditor({
+  title,
+  value,
+  fallback,
+  onChange,
+}: {
+  title: string;
+  value?: PayoutSchedule;
+  fallback: Required<PayoutSchedule>;
+  onChange: (s: PayoutSchedule) => void;
+}) {
+  const current = withDefaults(value, fallback);
+  const set = (patch: Partial<PayoutSchedule>) => onChange({ ...current, ...patch });
+  const next = nextPayoutDate(current, fallback);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <p className="font-bold text-sm text-slate-700 dark:text-slate-200">{title}</p>
+        <Badge tone="slate">Próximo: {formatDate(next)}</Badge>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Frequência">
+          <select
+            className="w-full px-3 py-2 rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
+            value={current.cadence}
+            onChange={(e) => set({ cadence: e.target.value as PayoutCadence })}
+          >
+            {Object.entries(CADENCE_LABELS).map(([k, label]) => (
+              <option key={k} value={k}>{label}</option>
+            ))}
+          </select>
+        </Field>
+
+        {current.cadence === 'monthly' ? (
+          <Field label="Dia do mês" hint="1 a 28">
+            <Input
+              type="number"
+              min={1}
+              max={28}
+              value={current.monthDay}
+              onChange={(e) => set({ monthDay: Number(e.target.value) })}
+            />
+          </Field>
+        ) : current.cadence === 'daily' ? (
+          <Field label="Dia" hint="Repasse em todo dia útil">
+            <Input value="Dias úteis" disabled />
+          </Field>
+        ) : (
+          <Field label="Dia da semana">
+            <select
+              className="w-full px-3 py-2 rounded-xl border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm"
+              value={current.weekday}
+              onChange={(e) => set({ weekday: Number(e.target.value) })}
+            >
+              {WEEKDAY_LABELS.map((label, i) =>
+                i === 0 ? null : <option key={i} value={i}>{label}</option>,
+              )}
+            </select>
+          </Field>
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 mt-3">
+        <Field label="Carência (dias)" hint="D+N após a entrega para liberar o valor">
+          <Input
+            type="number"
+            min={0}
+            max={90}
+            value={current.holdDays}
+            onChange={(e) => set({ holdDays: Number(e.target.value) })}
+          />
+        </Field>
+        <Field label="Valor mínimo R$" hint="Abaixo disso acumula para o próximo ciclo">
+          <Input
+            type="number"
+            min={0}
+            value={current.minimumAmount}
+            onChange={(e) => set({ minimumAmount: Number(e.target.value) })}
+          />
+        </Field>
+      </div>
+
+      <label className="flex items-center gap-2 mt-3 text-sm text-slate-600 dark:text-slate-300 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={current.autoTransfer}
+          onChange={(e) => set({ autoTransfer: e.target.checked })}
+          className="w-4 h-4 accent-brand"
+        />
+        Transferir automaticamente ao fechar o ciclo (Stripe Connect)
+      </label>
+
+      <p className="mt-2 text-xs text-slate-400">{describeSchedule(current, fallback)}</p>
+    </div>
   );
 }
