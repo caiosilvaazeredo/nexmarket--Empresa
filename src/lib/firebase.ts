@@ -17,27 +17,38 @@ export const storage = getStorage(app, `gs://${(firebaseConfig as any).storageBu
  * Custom Token. O Firebase Auth aqui só mantém a sessão (request.auth
  * continua populado para as Security Rules). */
 
-const AUTH_API_URL = (import.meta.env.VITE_AUTH_API_URL || 'http://localhost:8787').replace(/\/$/, '');
-
 /*
- * `VITE_AUTH_API_URL` é lida em tempo de build e embutida no bundle. Quando
- * falta, o padrão de desenvolvimento acompanha o site publicado e o painel
- * tenta logar contra a máquina de quem abriu a página — que não roda servidor
- * algum. O sintoma é ERR_CONNECTION_REFUSED em /api/auth/login, que parece
- * problema de rede e manda quem investiga para o lado errado.
+ * Endereço do servidor de autenticação.
  *
- * Este aviso transforma isso numa mensagem que diz o que fazer. É só um log:
- * não bloqueia o app, porque o mesmo bundle é usado em desenvolvimento.
+ * `VITE_AUTH_API_URL` é lida em tempo de BUILD e embutida no bundle — o que a
+ * torna uma armadilha: se faltar no momento da compilação, ajustá-la depois
+ * no painel não conserta nada, porque o valor errado já está dentro do
+ * JavaScript publicado. Foi exatamente o que aconteceu, e o sintoma
+ * (ERR_CONNECTION_REFUSED em localhost:8787) parece problema de rede,
+ * mandando quem investiga para o lado errado.
+ *
+ * Por isso o padrão deixou de ser localhost em toda parte e passou a depender
+ * de onde a página está rodando. Publicado sem a variável, o app ainda
+ * funciona; em desenvolvimento, continua apontando para o servidor local. A
+ * variável segue valendo como override — é ela quem manda quando o servidor
+ * mudar de endereço.
+ *
+ * Não é segredo: é o endereço público que os quatro apps chamam.
  */
-if (
-  !import.meta.env.VITE_AUTH_API_URL &&
-  typeof location !== 'undefined' &&
-  !['localhost', '127.0.0.1'].includes(location.hostname)
-) {
-  console.error(
-    '[Nexmarket] VITE_AUTH_API_URL não foi definida no build. O login vai ' +
-      `falhar tentando ${AUTH_API_URL}. Defina a variável no Render ` +
-      '(serviço nexmarket-empresa) e refaça o deploy.',
+const FALLBACK_API_URL = 'https://nexmarket-payments-60k3.onrender.com';
+
+function defaultApiUrl(): string {
+  const host = typeof location !== 'undefined' ? location.hostname : '';
+  const isLocal = ['localhost', '127.0.0.1', ''].includes(host);
+  return isLocal ? 'http://localhost:8787' : FALLBACK_API_URL;
+}
+
+const AUTH_API_URL = (import.meta.env.VITE_AUTH_API_URL || defaultApiUrl()).replace(/\/$/, '');
+
+if (!import.meta.env.VITE_AUTH_API_URL && !AUTH_API_URL.includes('localhost')) {
+  console.warn(
+    `[Nexmarket] VITE_AUTH_API_URL não foi definida no build; usando ${AUTH_API_URL}. ` +
+      'Defina a variável no serviço nexmarket-empresa do Render se o servidor mudar de endereço.',
   );
 }
 
