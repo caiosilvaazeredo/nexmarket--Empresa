@@ -8,8 +8,23 @@
  *   • Everything cross-origin (Firestore, Google APIs, map tiles) is NEVER
  *     intercepted — always hits the network so live data is never stale.
  */
-const CACHE = 'nex-admin-v1';
-const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/favicon.svg', '/icon.svg'];
+/*
+ * IMPORTANTE — suba este número a cada deploy que mude o app shell.
+ *
+ * O `activate` apaga todo cache com nome diferente do atual, então trocar a
+ * versão é o que conserta automaticamente quem ficou com um `index.html`
+ * antigo em cache (sintoma clássico: página abre sem CSS, porque o HTML
+ * guardado aponta para um bundle que não existe mais).
+ */
+const CACHE = 'nex-admin-v2';
+
+/*
+ * O `index.html` NÃO entra no shell pré-cacheado de propósito: ele é o único
+ * arquivo sem hash no nome e é justamente quem amarra os bundles do build.
+ * Deixá-lo fora evita fixar uma versão velha; a navegação é network-first e
+ * grava a resposta boa em `/` para o modo offline.
+ */
+const SHELL = ['/manifest.webmanifest', '/favicon.svg', '/icon.svg'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -50,11 +65,16 @@ self.addEventListener('fetch', (event) => {
   }
 
   // Static assets: stale-while-revalidate.
+  //
+  // Só é seguro porque os bundles do Vite carregam hash no nome
+  // (`index-C1mgQJ6u.css`): conteúdo novo = nome novo = nunca serve versão
+  // velha. Uma resposta ruim (404/500 durante um deploy) jamais é guardada,
+  // senão o erro ficaria grudado no cache.
   event.respondWith(
     caches.match(req).then((cached) => {
       const network = fetch(req)
         .then((res) => {
-          if (res && res.status === 200) {
+          if (res && res.status === 200 && res.type === 'basic') {
             const copy = res.clone();
             caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
           }
