@@ -75,6 +75,20 @@ services:
     runtime: static
     buildCommand: npm install && npm run build
     staticPublishPath: ./dist
+
+    envVars:
+      # Sem isto o Vite compila com o padrão de desenvolvimento
+      # (http://localhost:8787) embutido no bundle, e o painel publicado tenta
+      # logar contra a máquina de quem abriu o site — que não tem servidor
+      # nenhum. Sintoma: ERR_CONNECTION_REFUSED em /api/auth/login.
+      #
+      # É lido em tempo de BUILD, não de execução: trocar o valor exige um
+      # novo deploy para ter efeito.
+      # Precisa do esquema: o código concatena direto em `fetch(URL + path)`.
+      # Se um dia o servidor mudar de endereço (api.nexmarkt.com.br, por
+      # exemplo), altere aqui ou no painel do Render e refaça o deploy.
+      - key: VITE_AUTH_API_URL
+        value: https://nexmarket-payments-60k3.onrender.com
     # SPA: qualquer rota cai no index.html.
     routes:
       - type: rewrite

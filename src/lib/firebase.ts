@@ -19,6 +19,28 @@ export const storage = getStorage(app, `gs://${(firebaseConfig as any).storageBu
 
 const AUTH_API_URL = (import.meta.env.VITE_AUTH_API_URL || 'http://localhost:8787').replace(/\/$/, '');
 
+/*
+ * `VITE_AUTH_API_URL` é lida em tempo de build e embutida no bundle. Quando
+ * falta, o padrão de desenvolvimento acompanha o site publicado e o painel
+ * tenta logar contra a máquina de quem abriu a página — que não roda servidor
+ * algum. O sintoma é ERR_CONNECTION_REFUSED em /api/auth/login, que parece
+ * problema de rede e manda quem investiga para o lado errado.
+ *
+ * Este aviso transforma isso numa mensagem que diz o que fazer. É só um log:
+ * não bloqueia o app, porque o mesmo bundle é usado em desenvolvimento.
+ */
+if (
+  !import.meta.env.VITE_AUTH_API_URL &&
+  typeof location !== 'undefined' &&
+  !['localhost', '127.0.0.1'].includes(location.hostname)
+) {
+  console.error(
+    '[Nexmarket] VITE_AUTH_API_URL não foi definida no build. O login vai ' +
+      `falhar tentando ${AUTH_API_URL}. Defina a variável no Render ` +
+      '(serviço nexmarket-empresa) e refaça o deploy.',
+  );
+}
+
 async function requestCustomToken(path: string, body: Record<string, unknown>) {
   const res = await fetch(`${AUTH_API_URL}${path}`, {
     method: 'POST',
