@@ -1,0 +1,86 @@
+# Blueprint do Render — servidor de pagamentos, autenticação e e-mails.
+#
+# O painel da Empresa é um site estático (Vite) e o servidor é um serviço Node
+# separado. Este Blueprint publica os dois: o app web e a API que os quatro
+# apps consomem.
+#
+# Depois do deploy, preencha as variáveis marcadas com `sync: false` no painel
+# do Render (Environment → Add). Elas ficam em branco de propósito: são
+# segredos e não podem morar no repositório.
+#
+# A URL pública do serviço é detectada sozinha (RENDER_EXTERNAL_URL), então os
+# links dos e-mails e os redirects do Stripe já saem corretos sem configuração
+# extra.
+
+services:
+  # ------------------------------------------------------------------ API
+  - type: web
+    name: nexmarket-payments
+    runtime: node
+    plan: free
+    region: oregon
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: CURRENCY
+        value: brl
+      - key: ROOT_ADMIN_EMAIL
+        value: caiosazeredo@cos.ufrj.br
+
+      # --- Stripe (Dashboard → Developers → API keys) ---
+      # Sem STRIPE_SECRET_KEY o servidor sobe normalmente, mas as rotas de
+      # pagamento respondem 501 em vez de cobrar errado.
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PUBLISHABLE_KEY
+        sync: false
+      # Webhooks → Add endpoint apontando para <sua-url>/api/webhooks/stripe
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+
+      # --- Firebase Admin (Console → Contas de serviço → Gerar chave) ---
+      # Cole o JSON inteiro no valor. É obrigatória para login, identidade
+      # unificada e para o valor da cobrança vir do pedido salvo.
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false
+      - key: FIREBASE_PROJECT_ID
+        value: gen-lang-client-0615772467
+      - key: FIRESTORE_DATABASE_ID
+        value: ai-studio-2ab80fc8-bdc4-40c4-9282-35669db98074
+
+      # --- E-mails (resend.com → API Keys) ---
+      - key: RESEND_API_KEY
+        sync: false
+      - key: MAIL_FROM
+        value: Nexmarket <onboarding@resend.dev>
+
+      # --- Carteiras BR (opcionais) ---
+      - key: PICPAY_TOKEN
+        sync: false
+      - key: PICPAY_SELLER_TOKEN
+        sync: false
+      - key: NUPAY_API_URL
+        sync: false
+      - key: NUPAY_API_KEY
+        sync: false
+
+  # ------------------------------------------------- Painel da Empresa (web)
+  - type: web
+    name: nexmarket-empresa
+    runtime: static
+    plan: free
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    # SPA: qualquer rota cai no index.html.
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: SAMEORIGIN

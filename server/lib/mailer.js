@@ -23,6 +23,8 @@ const {
   MAIL_FROM = 'Nexmarket <onboarding@resend.dev>',
   APP_BASE_URL = '',
   PUBLIC_URL = '',
+  // Preenchida automaticamente pelo Render — usada quando as outras faltam.
+  RENDER_EXTERNAL_URL = '',
 } = process.env;
 
 export const mailEnabled = !!RESEND_API_KEY;
@@ -147,7 +149,7 @@ export function passwordChangedEmail({ name }) {
 
 /** URL da página de redefinição enviada no e-mail. */
 export function buildResetUrl(token, app) {
-  const base = APP_BASE_URL || PUBLIC_URL || '';
+  const base = APP_BASE_URL || PUBLIC_URL || RENDER_EXTERNAL_URL || '';
   const url = new URL('/redefinir-senha', base || 'http://localhost:8787');
   url.searchParams.set('token', token);
   if (app) url.searchParams.set('app', app);

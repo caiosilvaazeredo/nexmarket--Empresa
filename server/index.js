@@ -54,7 +54,15 @@ const STRIPE_PUBLISHABLE_KEY = process.env.STRIPE_PUBLISHABLE_KEY || '';
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 const CURRENCY = (process.env.CURRENCY || 'brl').toLowerCase();
 /** URL pública deste servidor (usada nas páginas de retorno do Checkout). */
-const PUBLIC_URL = (process.env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+// No Render (e em vários PaaS) a URL pública só é conhecida em runtime:
+// RENDER_EXTERNAL_URL vem pronta, então serve de padrão quando PUBLIC_URL
+// não foi preenchida à mão. Isso evita links de e-mail e redirects do
+// Stripe apontando para localhost em produção.
+const PUBLIC_URL = (
+  process.env.PUBLIC_URL ||
+  process.env.RENDER_EXTERNAL_URL ||
+  `http://localhost:${PORT}`
+).replace(/\/$/, '');
 const ROOT_ADMIN_EMAIL = (process.env.ROOT_ADMIN_EMAIL || 'caiosazeredo@cos.ufrj.br').toLowerCase();
 
 if (!STRIPE_SECRET_KEY) {

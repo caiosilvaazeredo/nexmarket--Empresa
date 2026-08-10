@@ -141,3 +141,29 @@ npm start
 - [ ] `FIREBASE_SERVICE_ACCOUNT` preenchida (obrigatória para identidade e login)
 - [ ] Domínio verificado no Resend (para enviar a qualquer destinatário)
 - [ ] Apps buildados com `--dart-define=NEXMARKET_API=...`
+
+---
+
+## 5. Deploy no Render (Blueprint)
+
+O repositório traz um **`render.yaml`** na raiz que publica os dois serviços:
+a API (`server/`) e o painel da Empresa (site estático).
+
+1. Render → **New → Blueprint** → conecte `caiosilvaazeredo/nexmarket--Empresa`
+2. **Branch:** a que contém o `render.yaml`
+3. **Blueprint Path:** `render.yaml` (padrão)
+4. Aplique. O Render cria `nexmarket-payments` (API) e `nexmarket-empresa` (painel)
+5. Em **nexmarket-payments → Environment**, preencha os segredos:
+   `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET`,
+   `FIREBASE_SERVICE_ACCOUNT` (JSON inteiro) e `RESEND_API_KEY`
+6. Copie a URL gerada (algo como `https://nexmarket-payments.onrender.com`) e:
+   - cole em **Configurações → Endpoint de pagamentos** no painel da Empresa
+   - cadastre `<url>/api/webhooks/stripe` em Stripe → Webhooks
+   - use nos builds dos apps: `--dart-define=NEXMARKET_API=<url>`
+
+`PUBLIC_URL` e `APP_BASE_URL` **não precisam ser preenchidas**: o servidor usa
+a `RENDER_EXTERNAL_URL` que o Render injeta, então os links dos e-mails e os
+redirects do Stripe já saem corretos.
+
+> No plano gratuito o serviço dorme após ~15 min sem tráfego e leva ~30 s para
+> acordar. Serve para testar; para produção use um plano pago (ou Cloud Run).
