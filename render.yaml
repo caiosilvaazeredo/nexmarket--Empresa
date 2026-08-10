@@ -69,10 +69,10 @@ services:
         sync: false
 
   # ------------------------------------------------- Painel da Empresa (web)
+  # Site estático não aceita a chave `plan` — a hospedagem é sempre gratuita.
   - type: web
     name: nexmarket-empresa
     runtime: static
-    plan: free
     buildCommand: npm install && npm run build
     staticPublishPath: ./dist
     # SPA: qualquer rota cai no index.html.
