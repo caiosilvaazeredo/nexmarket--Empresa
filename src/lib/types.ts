@@ -596,10 +596,36 @@ export interface FiscalReport {
 }
 
 /* ============================== ADMIN: Platform config ============================== */
+/** Com que frequência os repasses são gerados (RF: temporalidade). */
+export type PayoutCadence = 'daily' | 'weekly' | 'biweekly' | 'monthly';
+
+/**
+ * Calendário de pagamento de um lado da plataforma (loja ou entregador).
+ * `holdDays` é a carência antes de o valor ficar disponível (D+N a partir da
+ * entrega); `minimumAmount` segura repasses pequenos para o ciclo seguinte.
+ */
+export interface PayoutSchedule {
+  cadence?: PayoutCadence;
+  /** Dia da semana do repasse (1=segunda … 7=domingo) — weekly/biweekly. */
+  weekday?: number;
+  /** Dia do mês do repasse (1-28) — monthly. */
+  monthDay?: number;
+  /** Carência em dias após a entrega até o valor ficar disponível. */
+  holdDays?: number;
+  /** Valor mínimo para gerar o repasse; abaixo disso acumula. */
+  minimumAmount?: number;
+  /** Transferir automaticamente via Stripe Connect ao fechar o ciclo. */
+  autoTransfer?: boolean;
+}
+
 export interface PlatformConfig {
   /** Default commission % applied to new stores. */
   defaultCommissionPct?: number;
   defaultFixedFee?: number;
+  /** Calendário de repasse das lojas parceiras. */
+  storePayout?: PayoutSchedule;
+  /** Calendário de repasse dos entregadores. */
+  driverPayout?: PayoutSchedule;
   /** Cashback (%) creditado na carteira do cliente a cada pedido entregue.
    *  Também é espelhado em platformConfig/public para os apps lerem. */
   cashbackPct?: number;

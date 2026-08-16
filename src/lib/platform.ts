@@ -21,10 +21,16 @@ export async function savePlatformConfig(patch: Partial<PlatformConfig>) {
     { merge: true },
   );
   // Espelha no doc PÚBLICO apenas o que os apps clientes precisam ler.
-  if (patch.cashbackPct !== undefined) {
+  // O calendário de repasse vai junto: os apps da loja e do entregador
+  // mostram ao parceiro quando ele recebe.
+  const publicPatch: Record<string, unknown> = {};
+  if (patch.cashbackPct !== undefined) publicPatch.cashbackPct = Number(patch.cashbackPct) || 0;
+  if (patch.storePayout !== undefined) publicPatch.storePayout = patch.storePayout;
+  if (patch.driverPayout !== undefined) publicPatch.driverPayout = patch.driverPayout;
+  if (Object.keys(publicPatch).length > 0) {
     await setDoc(
       doc(db, 'platformConfig', 'public'),
-      { cashbackPct: Number(patch.cashbackPct) || 0, updatedAt: serverTimestamp() },
+      { ...publicPatch, updatedAt: serverTimestamp() },
       { merge: true },
     );
   }

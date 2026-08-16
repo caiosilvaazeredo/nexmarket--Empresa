@@ -157,3 +157,59 @@ public/       manifest.webmanifest · sw.js · ícones (PWA)
 Em **Configurações → Dados de demonstração**, o master pode popular o painel
 (lojas, entregadores com documentos, clientes, pedidos, tickets, campanha) —
 tudo marcado como `demo: true` e removível com um clique.
+
+---
+
+## 🗓️ Calendário de pagamentos (temporalidade)
+
+`Configurações → Calendário de pagamentos` define, separadamente para
+**lojas** e **entregadores**:
+
+| Parâmetro | O que faz |
+|---|---|
+| Frequência | diário (dias úteis), semanal, quinzenal ou mensal |
+| Dia | dia da semana (semanal/quinzenal) ou do mês (1–28) |
+| Carência | D+N após a entrega até o valor ficar disponível |
+| Valor mínimo | abaixo disso o valor acumula para o próximo ciclo |
+| Transferência automática | envia pela Stripe Connect ao fechar o ciclo |
+
+Fica em `platformConfig/main` e é espelhado em `platformConfig/public`, de
+onde os apps da **loja** e do **entregador** leem para mostrar ao parceiro
+quando ele recebe e qual é a data do próximo pagamento
+(`src/lib/payoutSchedule.ts` calcula a próxima data).
+
+## 💳 Servidor de pagamentos e Stripe
+
+```bash
+cd server
+cp .env.example .env      # preencha STRIPE_SECRET_KEY e o resto
+npm install
+npm run doctor            # diagnóstico da configuração + API real
+npm start
+```
+
+`npm run doctor` responde objetivamente se a Stripe está funcionando: valida o
+par de chaves (recusa misturar test/live), conecta na API, confere se a conta
+pode cobrar e sacar, lista se **cartão e PIX** estão habilitados, verifica se
+há **webhook** apontando para o `PUBLIC_URL` com os eventos necessários e se o
+**Connect** está ativo. Com `--deep` ele cria e cancela um PaymentIntent real
+de R$ 1,00.
+
+```bash
+npm test                              # 15 testes: falha segura, validações, rotas
+STRIPE_SECRET_KEY=sk_test_... npm test  # + integração real (cartão, recusa, estorno, webhook)
+```
+
+Os testes de integração são **pulados** sem a chave e **recusam rodar com
+chave de produção** (`sk_live_`).
+
+---
+
+## 👤 Conta única e e-mails transacionais
+
+O mesmo e-mail passa a ser **uma única pessoa** nos quatro apps
+(`identities/{email}`), com papéis acumuláveis e senha única. O disparo de
+e-mails de cadastro e recuperação de senha sai deste servidor via **Resend**.
+
+📘 **[server/GUIA-EMAIL-E-CONTAS.md](./server/GUIA-EMAIL-E-CONTAS.md)** — como
+ligar o e-mail em ~5 minutos e como a identidade unificada funciona.

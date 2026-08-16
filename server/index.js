@@ -40,6 +40,13 @@ import {
   markOrderRefunded,
 } from './lib/firebase.js';
 import { login as authLogin, createCredential, setPassword as authSetPassword } from './lib/auth.js';
+import { claimIdentity, findIdentity, findIdentityByUid, normEmail as normalizeEmail } from './lib/identity.js';
+import {
+  checkResetToken,
+  confirmPasswordReset,
+  requestPasswordReset,
+} from './lib/passwordReset.js';
+import { mailEnabled, sendMail, welcomeEmail } from './lib/mailer.js';
 
 const PORT = Number(process.env.PORT || 8787);
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
@@ -47,7 +54,15 @@ const STRIPE_PUBLISHABLE_KEY = process.env.STRIPE_PUBLISHABLE_KEY || '';
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 const CURRENCY = (process.env.CURRENCY || 'brl').toLowerCase();
 /** URL pública deste servidor (usada nas páginas de retorno do Checkout). */
-const PUBLIC_URL = (process.env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+// No Render (e em vários PaaS) a URL pública só é conhecida em runtime:
+// RENDER_EXTERNAL_URL vem pronta, então serve de padrão quando PUBLIC_URL
+// não foi preenchida à mão. Isso evita links de e-mail e redirects do
+// Stripe apontando para localhost em produção.
+const PUBLIC_URL = (
+  process.env.PUBLIC_URL ||
+  process.env.RENDER_EXTERNAL_URL ||
+  `http://localhost:${PORT}`
+).replace(/\/$/, '');
 const ROOT_ADMIN_EMAIL = (process.env.ROOT_ADMIN_EMAIL || 'caiosazeredo@cos.ufrj.br').toLowerCase();
 
 if (!STRIPE_SECRET_KEY) {
@@ -120,6 +135,85 @@ function safeNext(next) {
   if (typeof next !== 'string') return '';
   return /^[a-z][a-z0-9+.-]*:\/\/[^\s]*$/i.test(next) && !/^javascript:/i.test(next) ? next : '';
 }
+
+/* ------------------------- Identidade e e-mails ---------------------------- */
+
+/** Boas-vindas — nunca derruba o cadastro se o e-mail falhar. */
+async function sendWelcome(email, name, app) {
+  try {
+    const { subject, html, text } = welcomeEmail({ name, app });
+    await sendMail({ to: email, subject, html, text });
+  } catch (e) {
+    console.warn('[mail] boas-vindas falhou:', e.message);
+  }
+}
+
+/**
+ * Registra o papel de quem se cadastrou direto no Firebase Auth (app do
+ * cliente e do entregador). É o que impede o mesmo e-mail de virar contas
+ * paralelas: a identidade passa a conhecer todos os papéis do uid.
+ */
+app.post('/api/identity/claim', requireAuth, asyncRoute(async (req, res) => {
+  const { role, name } = req.body || {};
+  const email = req.user.email;
+  if (!email) return res.status(400).json({ error: 'Conta sem e-mail.' });
+
+  const result = await claimIdentity({
+    uid: req.user.uid,
+    email,
+    role: role || 'cliente',
+    displayName: name,
+  });
+  // Primeiro papel dessa pessoa: manda as boas-vindas.
+  if (Object.keys(result.roles).length === 1) {
+    await sendWelcome(normalizeEmail(email), name, role || 'cliente');
+  }
+  res.json(result);
+}));
+
+/** "Quem sou eu": papéis da conta logada, para o app se orientar. */
+app.get('/api/identity/me', requireAuth, asyncRoute(async (req, res) => {
+  const identity =
+    (await findIdentityByUid(req.user.uid)) ||
+    (req.user.email ? await findIdentity(req.user.email) : null);
+  res.json({
+    uid: req.user.uid,
+    email: req.user.email || identity?.email || null,
+    roles: identity?.roles || {},
+    active: identity?.active !== false,
+  });
+}));
+
+/* --------------------------- Recuperação de senha -------------------------- */
+
+/**
+ * Pede o e-mail de redefinição. A resposta é sempre a mesma, exista a conta
+ * ou não — não revelamos quais e-mails estão cadastrados.
+ */
+app.post('/api/auth/forgot-password', asyncRoute(async (req, res) => {
+  const { email, app: appName } = req.body || {};
+  if (!email) return res.status(400).json({ error: 'Informe o e-mail.' });
+  const result = await requestPasswordReset({ email, app: appName });
+  res.json({
+    ok: true,
+    message: 'Se este e-mail tiver conta na Nexmarket, o link de redefinição chegará em instantes.',
+    mailEnabled,
+    ...(result.skipped ? { warning: 'Servidor sem RESEND_API_KEY: e-mail não enviado.' } : {}),
+  });
+}));
+
+/** Valida o link antes de mostrar o formulário de nova senha. */
+app.get('/api/auth/reset-password', asyncRoute(async (req, res) => {
+  const data = await checkResetToken(String(req.query.token || ''));
+  res.json({ ok: true, ...data });
+}));
+
+/** Efetiva a nova senha (vale para todos os apps). */
+app.post('/api/auth/reset-password', asyncRoute(async (req, res) => {
+  const { token, newPassword } = req.body || {};
+  const result = await confirmPasswordReset({ token, newPassword });
+  res.json(result);
+}));
 
 /* ---------------------- Stripe Customer por usuário ------------------------ */
 /** Cartões salvos e assinaturas ficam presos a um Customer da Stripe amarrado
@@ -212,8 +306,12 @@ app.post('/api/auth/register', asyncRoute(async (req, res) => {
         error: 'Este e-mail não tem convite pendente. Peça a um administrador master.',
       });
     }
-    const uid = randomUUID();
-    await createCredential({ app: appName, email: normEmail, password, uid });
+    const { uid } = await createCredential({
+      app: appName,
+      email: normEmail,
+      password,
+      displayName: profile?.name,
+    });
     const role = isRoot ? 'master' : (inviteSnap.data().role || 'viewer');
     await db.doc(`admins/${uid}`).set({
       name: profile?.name || normEmail.split('@')[0],
@@ -226,16 +324,23 @@ app.post('/api/auth/register', asyncRoute(async (req, res) => {
       updatedAt: FieldValue.serverTimestamp(),
     });
     if (!isRoot) await db.doc(`adminInvites/${normEmail}`).delete().catch(() => {});
+    await sendWelcome(normEmail, profile?.name, appName);
     const customToken = await adminAuth.createCustomToken(uid, { app: appName });
     return res.json({ customToken, uid });
   }
 
   // Loja e Entregador: cadastro aberto — o app cria o próprio perfil
-  // (users/{uid} ou drivers/{uid}) depois do login, como já fazia.
-  const uid = randomUUID();
-  await createCredential({ app: appName, email: normEmail, password, uid });
-  const customToken = await adminAuth.createCustomToken(uid, { app: appName });
-  res.json({ customToken, uid });
+  // (users/{uid} ou drivers/{uid}) depois do login, como já fazia. O uid vem
+  // da identidade unificada: quem já é cliente entra com o MESMO uid.
+  const { uid, accumulated, roles } = await createCredential({
+    app: appName,
+    email: normEmail,
+    password,
+    displayName: profile?.name,
+  });
+  if (!accumulated) await sendWelcome(normEmail, profile?.name, appName);
+  const customToken = await adminAuth.createCustomToken(uid, { app: appName, roles });
+  res.json({ customToken, uid, roles, accumulated });
 }));
 
 /** Master admin redefine a senha de um operador/lojista/entregador (sem
@@ -1072,6 +1177,79 @@ app.get('/return/cancel', (req, res) => {
       message: 'Nenhum valor foi cobrado. Você pode tentar novamente pelo app.',
       next: req.query.next,
     }));
+});
+
+/* ---------------------- Página de redefinição de senha --------------------- */
+
+/** Página que o link do e-mail abre — funciona em qualquer navegador, sem app. */
+app.get('/redefinir-senha', (req, res) => {
+  const token = String(req.query.token || '').replace(/[^a-f0-9]/gi, '');
+  res.type('html').send(`<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Redefinir senha · Nexmarket</title>
+<style>
+body{margin:0;padding:24px;background:#F7F7F7;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{background:#fff;border:2px solid #E5E5E5;border-radius:20px;padding:32px;max-width:400px;width:100%}
+.logo{width:56px;height:56px;background:#58CC02;border-radius:16px;display:flex;align-items:center;justify-content:center;font-size:28px}
+h1{font-size:22px;margin:20px 0 8px;color:#111}p{color:#555;margin:0 0 20px;line-height:1.5}
+label{display:block;font-size:13px;font-weight:700;color:#666;margin:12px 0 6px}
+input{width:100%;box-sizing:border-box;padding:12px 14px;border:2px solid #E5E5E5;border-radius:14px;font-size:16px}
+input:focus{outline:none;border-color:#58CC02}
+button{width:100%;margin-top:20px;padding:14px;background:#58CC02;color:#fff;border:0;border-radius:14px;font-size:16px;font-weight:800;cursor:pointer}
+button:disabled{background:#CCC;cursor:not-allowed}
+.msg{margin-top:16px;padding:12px;border-radius:12px;font-size:14px;font-weight:600}
+.err{background:#FEF2F2;color:#B91C1C}.ok{background:#F0FDF4;color:#15803D}
+</style></head><body>
+<div class="card">
+  <div class="logo">🛒</div>
+  <h1>Criar nova senha</h1>
+  <p id="intro">Escolha uma senha nova para sua conta Nexmarket. Ela vale para todos os apps da plataforma.</p>
+  <form id="form">
+    <label for="p1">Nova senha</label>
+    <input id="p1" type="password" minlength="6" required autocomplete="new-password">
+    <label for="p2">Repita a nova senha</label>
+    <input id="p2" type="password" minlength="6" required autocomplete="new-password">
+    <button id="btn" type="submit">Salvar nova senha</button>
+  </form>
+  <div id="msg"></div>
+</div>
+<script>
+const token = ${JSON.stringify(token)};
+const form = document.getElementById('form');
+const msg = document.getElementById('msg');
+const btn = document.getElementById('btn');
+const show = (text, cls) => { msg.className = 'msg ' + cls; msg.textContent = text; };
+
+// Valida o link assim que a página abre.
+fetch('/api/auth/reset-password?token=' + encodeURIComponent(token))
+  .then(r => r.json().then(b => ({ ok: r.ok, b })))
+  .then(({ ok, b }) => { if (!ok) { form.style.display = 'none'; show(b.error || 'Link inválido.', 'err'); } })
+  .catch(() => show('Não foi possível validar o link.', 'err'));
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const p1 = document.getElementById('p1').value;
+  const p2 = document.getElementById('p2').value;
+  if (p1 !== p2) return show('As senhas não são iguais.', 'err');
+  if (p1.length < 6) return show('A senha precisa ter ao menos 6 caracteres.', 'err');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/auth/reset-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, newPassword: p1 }),
+    });
+    const body = await res.json();
+    if (!res.ok) { btn.disabled = false; return show(body.error || 'Não foi possível redefinir.', 'err'); }
+    form.style.display = 'none';
+    document.getElementById('intro').style.display = 'none';
+    show('Senha alterada! Volte ao app e entre com a nova senha.', 'ok');
+  } catch {
+    btn.disabled = false;
+    show('Falha de conexão. Tente novamente.', 'err');
+  }
+});
+</script></body></html>`);
 });
 
 app.listen(PORT, () => {
