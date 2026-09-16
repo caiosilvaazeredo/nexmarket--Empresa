@@ -199,22 +199,22 @@ function OrderDrawer({ order, storeName, onClose }: { order: Order | null; store
     const amt = Number(amount);
     if (!amt || amt <= 0 || !reason.trim()) return;
 
-    // Pagamento online (Stripe): executa o estorno REAL no gateway primeiro.
-    const pi = order.payment?.paymentIntentId;
-    let viaStripe = false;
-    if (pi) {
+    // Pagamento online (Pagar.me): executa o estorno REAL no gateway primeiro.
+    const chargeId = order.payment?.chargeId;
+    let viaPagarme = false;
+    if (chargeId) {
       try {
         await gatewayRefund({
           smId: order.supermarketId,
           orderId: order.id,
-          paymentIntentId: pi,
+          chargeId,
           amount: amt,
           reason: reason.trim(),
         });
-        viaStripe = true;
+        viaPagarme = true;
       } catch (e: any) {
         if (!e?.notConfigured) {
-          toast(`Estorno via Stripe falhou: ${e?.message || e}`, 'error');
+          toast(`Estorno via Pagar.me falhou: ${e?.message || e}`, 'error');
           return;
         }
         // servidor não configurado → segue só com o registro contábil
@@ -224,8 +224,8 @@ function OrderDrawer({ order, storeName, onClose }: { order: Order | null; store
     await refundOrder(order, amt, reason.trim());
     setRefundOpen(false);
     toast(
-      viaStripe
-        ? 'Estorno executado na Stripe e registrado.'
+      viaPagarme
+        ? 'Estorno executado na Pagar.me e registrado.'
         : 'Estorno registrado. Sem cobrança online associada — faça a devolução manual.',
       'success',
     );

@@ -1,9 +1,9 @@
 /**
  * Client do SERVIDOR DE PAGAMENTOS (pasta server/ deste repositório).
  *
- * O painel nunca fala com a Stripe diretamente: estornos e repasses rodam no
- * backend com a chave secreta; aqui só circulam o token Firebase do operador
- * e os identificadores do pedido/saque (RNF05).
+ * O painel nunca fala com a Pagar.me diretamente: estornos e repasses rodam
+ * no backend com a chave secreta; aqui só circulam o token Firebase do
+ * operador e os identificadores do pedido/saque (RNF05).
  */
 import { doc, getDoc } from 'firebase/firestore';
 import { db, auth } from './firebase';
@@ -44,26 +44,25 @@ async function api<T>(
 
 export interface GatewayHealth {
   ok: boolean;
-  stripe: boolean;
+  pagarme: boolean;
   firestoreAdmin: boolean;
   webhookConfigured: boolean;
   currency: string;
-  stripeAccountLive?: boolean;
 }
 
 /** Diagnóstico do servidor (não requer login — usado no “Testar conexão”). */
 export async function gatewayHealth(url: string): Promise<GatewayHealth> {
-  const res = await fetch(`${url.replace(/\/$/, '')}/health?deep=1`);
+  const res = await fetch(`${url.replace(/\/$/, '')}/health`);
   if (!res.ok) throw new Error(`Servidor respondeu ${res.status}.`);
   return res.json();
 }
 
-/** Estorno REAL na Stripe. Lança erro com `notOnline=true` quando o pedido não
- * tem pagamento online associado (aí só o registro contábil local se aplica). */
+/** Estorno REAL na Pagar.me. Lança erro com `notOnline=true` quando o pedido
+ * não tem pagamento online associado (aí só o registro contábil local se aplica). */
 export async function gatewayRefund(input: {
   smId: string;
   orderId: string;
-  paymentIntentId?: string;
+  chargeId?: string;
   amount?: number;
   reason?: string;
 }): Promise<{ ok: boolean; refundId: string; amount: number }> {
@@ -72,7 +71,7 @@ export async function gatewayRefund(input: {
   return api(base, '/api/payments/refund', { method: 'POST', body: JSON.stringify(input) });
 }
 
-/** Repasse de saque do entregador via Stripe Connect. */
+/** Repasse de saque do entregador via Pagar.me (recebedor já cadastrado). */
 export async function gatewayPayout(input: {
   driverId: string;
   amount: number;
@@ -80,7 +79,7 @@ export async function gatewayPayout(input: {
 }): Promise<{ ok: boolean; transferId: string; amount: number }> {
   const base = await resolvePaymentsApiUrl();
   if (!base) throw Object.assign(new Error('Servidor de pagamentos não configurado.'), { notConfigured: true });
-  return api(base, '/api/connect/payout', { method: 'POST', body: JSON.stringify(input) });
+  return api(base, '/api/payouts/transfer', { method: 'POST', body: JSON.stringify(input) });
 }
 
 export async function paymentsGatewayConfigured(): Promise<boolean> {

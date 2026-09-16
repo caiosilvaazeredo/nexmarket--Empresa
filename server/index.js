@@ -331,7 +331,7 @@ app.post('/api/payments/checkout', requireAuth, asyncRoute(async (req, res) => {
     description = `Pedido #${String(orderId).slice(0, 8)}${order.storeName ? ` — ${order.storeName}` : ''}`;
     split = await buildStoreSplit(smId, order.subtotal);
     afterPaid = async () => {
-      await markOrderPaid({ smId, orderId, paymentIntentId: pgOrder.id, provider: 'pagarme', method: paymentMethod === 'pix' ? 'pix' : 'card_online' });
+      await markOrderPaid({ smId, orderId, paymentIntentId: pgOrder.id, chargeId: charge?.id, provider: 'pagarme', method: paymentMethod === 'pix' ? 'pix' : 'card_online' });
     };
   }
 
@@ -408,7 +408,7 @@ app.get('/api/payments/status', requireAuth, asyncRoute(async (req, res) => {
   const status = mapPagarmeStatus(pgOrder.status, charge?.status);
 
   if (status === 'paid' && firestoreEnabled && smId && orderId) {
-    await markOrderPaid({ smId: String(smId), orderId: String(orderId), paymentIntentId: pgOrder.id, provider: 'pagarme' });
+    await markOrderPaid({ smId: String(smId), orderId: String(orderId), paymentIntentId: pgOrder.id, chargeId: charge?.id, provider: 'pagarme' });
   }
 
   res.json({ status, paid: status === 'paid', pagarmeOrderId: pgOrder.id, chargeId: charge?.id || null });
@@ -723,7 +723,7 @@ app.post('/api/webhooks/pagarme', express.json(), asyncRoute(async (req, res) =>
       case 'order.paid':
       case 'charge.paid':
         if (firestoreEnabled) {
-          await markOrderPaid({ smId, orderId, paymentIntentId: pgOrderId, provider: 'pagarme' });
+          await markOrderPaid({ smId, orderId, paymentIntentId: pgOrderId, chargeId, provider: 'pagarme' });
         }
         break;
       case 'order.payment_failed':

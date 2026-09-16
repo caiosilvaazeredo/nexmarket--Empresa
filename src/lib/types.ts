@@ -290,10 +290,11 @@ export type PaymentStatus = 'pending' | 'paid' | 'failed' | 'refunded' | 'charge
 export interface PaymentInfo {
   method?: PaymentMethod;
   status?: PaymentStatus;
-  provider?: 'stripe' | 'mercadopago' | 'pagarme' | string;
+  provider?: 'pagarme' | 'stripe' | 'mercadopago' | string;
   tokenId?: string;
-  /** Stripe: PaymentIntent/Checkout associados — permitem estorno real. */
+  /** Pagar.me: id do pedido (order) e da cobrança (charge) — o estorno usa o charge. */
   paymentIntentId?: string;
+  chargeId?: string;
   checkoutSessionId?: string;
   refundId?: string;
   failureReason?: string;
