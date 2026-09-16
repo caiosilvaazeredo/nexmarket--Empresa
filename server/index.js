@@ -1,30 +1,31 @@
 /**
- * Nexmarket — Servidor de Pagamentos (Stripe) + Autenticação compartilhada
+ * Nexmarket — Servidor de Pagamentos (Pagar.me/Stone) + Autenticação compartilhada
  * ============================================
- * Único componente da plataforma que usa a CHAVE SECRETA da Stripe.
+ * Único componente da plataforma que usa a CHAVE SECRETA da Pagar.me.
  * Atende os quatro apps (cliente, loja, entregador e painel Empresa):
  *
- *   • POST /api/auth/login · /api/auth/register  → autenticação (loja/empresa/entregador)
- *   • POST /api/payments/checkout-session  → Stripe Checkout (cartão) p/ um pedido
- *   • POST /api/payments/pix-intent        → PaymentIntent PIX (QR + copia-e-cola)
- *   • GET  /api/payments/status            → consulta/concilia o status de um pagamento
- *   • POST /api/payments/refund            → estorno (admin ou dono da loja)
- *   • POST /api/webhooks/stripe            → webhook (marca pedidos pagos/estornados)
- *   • POST /api/connect/account-link       → onboarding Stripe Connect do entregador
- *   • GET  /api/connect/status             → status da conta Connect do entregador
- *   • POST /api/connect/payout             → repasse p/ entregador (admin)
- *   • GET  /health · GET /config           → diagnóstico e config pública
+ *   • POST /api/auth/login · /api/auth/register     → autenticação (loja/empresa/entregador)
+ *   • POST /api/payments/checkout                    → cobra um pedido (cartão ou PIX) com split p/ a loja
+ *   • GET  /api/payments/status                       → consulta/concilia o status de um pagamento
+ *   • POST /api/payments/refund                       → estorno (admin ou dono da loja)
+ *   • POST /api/payments/item-refund                  → reembolso self-service por item (teto automático)
+ *   • GET/DELETE /api/payments/saved-methods           → cartões salvos do cliente (1 toque)
+ *   • POST /api/webhooks/pagarme                       → webhook (marca pedidos pagos/estornados)
+ *   • POST /api/recipients/store · /api/recipients/driver → onboarding de recebedor (KYC + conta bancária)
+ *   • GET  /api/recipients/store/status · /driver/status  → status do recebedor
+ *   • POST /api/payouts/transfer                        → repasse sob demanda p/ entregador (admin)
+ *   • GET  /health · GET /config                        → diagnóstico e config pública
  *
- * Variáveis de ambiente: ver .env.example. NUNCA exponha STRIPE_SECRET_KEY
- * em um app cliente ou em repositório. A chave da Stripe é OPCIONAL: sem ela
- * o servidor sobe normalmente (autenticação funciona) e apenas as rotas de
- * pagamento respondem 501.
+ * Variáveis de ambiente: ver .env.example. NUNCA exponha PAGARME_SECRET_KEY
+ * em um app cliente ou em repositório — só a PAGARME_PUBLIC_KEY (usada para
+ * tokenizar cartão no app, ver GET /config) pode circular no cliente.
+ * A Pagar.me é OPCIONAL: sem a secret key o servidor sobe normalmente
+ * (autenticação funciona) e só as rotas de pagamento respondem 501.
  */
 import 'dotenv/config';
 import { randomUUID } from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
-import Stripe from 'stripe';
 import {
   requireAuth,
   isAdminUser,
@@ -40,23 +41,26 @@ import {
   markOrderRefunded,
 } from './lib/firebase.js';
 import { login as authLogin, createCredential, setPassword as authSetPassword } from './lib/auth.js';
+import { createPagarmeClient, CLIENT_TOKEN_ENDPOINT } from './lib/pagarme.js';
+import { COMMISSION_PCT, MIN_ORDER_BRL, calcOrderBreakdown } from './lib/fees.js';
 
 const PORT = Number(process.env.PORT || 8787);
-const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
-const STRIPE_PUBLISHABLE_KEY = process.env.STRIPE_PUBLISHABLE_KEY || '';
-const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
+const PAGARME_SECRET_KEY = process.env.PAGARME_SECRET_KEY || '';
+const PAGARME_PUBLIC_KEY = process.env.PAGARME_PUBLIC_KEY || '';
+const PAGARME_WEBHOOK_SECRET = process.env.PAGARME_WEBHOOK_SECRET || '';
 const CURRENCY = (process.env.CURRENCY || 'brl').toLowerCase();
-/** URL pública deste servidor (usada nas páginas de retorno do Checkout). */
 const PUBLIC_URL = (process.env.PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
 const ROOT_ADMIN_EMAIL = (process.env.ROOT_ADMIN_EMAIL || 'caiosazeredo@cos.ufrj.br').toLowerCase();
+const MAX_TIP_BRL = Number(process.env.MAX_TIP_BRL || 200);
+const SELF_REFUND_LIMIT_BRL = Number(process.env.SELF_REFUND_LIMIT_BRL || 50);
 
-if (!STRIPE_SECRET_KEY) {
-  console.warn('[stripe] STRIPE_SECRET_KEY não definida — rotas de pagamento respondem 501; autenticação (/api/auth/*) funciona normalmente.');
+if (!PAGARME_SECRET_KEY) {
+  console.warn('[pagarme] PAGARME_SECRET_KEY não definida — rotas de pagamento respondem 501; autenticação (/api/auth/*) funciona normalmente.');
 }
 
-/** `null` quando a Stripe não está configurada — as rotas de pagamento são
+/** `null` quando a Pagar.me não está configurada — as rotas de pagamento são
  * barradas pelo middleware requirePayments antes de chegar a usá-lo. */
-const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
+const pagarme = createPagarmeClient(PAGARME_SECRET_KEY);
 const app = express();
 
 app.use(
@@ -65,28 +69,24 @@ app.use(
   }),
 );
 
-/* O webhook precisa do corpo BRUTO para validar a assinatura — registrado
- * ANTES do express.json(). */
-app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), handleWebhook);
-
 app.use(express.json());
 
-/* Sem STRIPE_SECRET_KEY as rotas de pagamento/repasse ficam indisponíveis
+/* Sem PAGARME_SECRET_KEY as rotas de pagamento/repasse ficam indisponíveis
  * (501), mas o restante do servidor — principalmente /api/auth/* — segue no
  * ar. Registrado antes das rotas para interceptá-las. */
-app.use(['/api/payments', '/api/connect'], (req, res, next) => {
-  if (!stripe) {
+app.use(['/api/payments', '/api/recipients', '/api/payouts'], (req, res, next) => {
+  if (!pagarme) {
     return res.status(501).json({
-      error: 'Pagamentos indisponíveis: STRIPE_SECRET_KEY não configurada no servidor.',
+      error: 'Pagamentos indisponíveis: PAGARME_SECRET_KEY não configurada no servidor.',
       paymentsUnavailable: true,
     });
   }
   next();
 });
 
-const asyncRoute = (fn) => (req, res) => fn(req, res).catch((e) => sendStripeError(res, e));
+const asyncRoute = (fn) => (req, res) => fn(req, res).catch((e) => sendApiError(res, e));
 
-function sendStripeError(res, e) {
+function sendApiError(res, e) {
   console.error('[api]', e?.message || e);
   const status = e?.statusCode && e.statusCode >= 400 && e.statusCode < 600 ? e.statusCode : 500;
   res.status(status).json({
@@ -96,24 +96,7 @@ function sendStripeError(res, e) {
 }
 
 const toCents = (v) => Math.round(Number(v) * 100);
-
-/**
- * Resolve o valor a cobrar. Com Firestore admin, o valor SEMPRE vem do
- * pedido salvo (imune a adulteração no cliente); sem ele, confia no valor
- * enviado e marca a origem nos metadados.
- */
-async function resolveAmount({ smId, orderId, amount }) {
-  if (firestoreEnabled) {
-    const order = await getOrder(smId, orderId);
-    if (!order) throw Object.assign(new Error('Pedido não encontrado.'), { statusCode: 404 });
-    const cents = toCents(order.total);
-    if (!(cents > 0)) throw Object.assign(new Error('Pedido com valor inválido.'), { statusCode: 400 });
-    return { cents, source: 'firestore', order };
-  }
-  const cents = toCents(amount);
-  if (!(cents > 0)) throw Object.assign(new Error('Valor do pagamento inválido.'), { statusCode: 400 });
-  return { cents, source: 'client', order: null };
-}
+const onlyDigits = (s) => String(s || '').replace(/\D/g, '');
 
 /** Deep links de volta ao app: aceita apenas esquemas simples (evita open redirect). */
 function safeNext(next) {
@@ -121,66 +104,101 @@ function safeNext(next) {
   return /^[a-z][a-z0-9+.-]*:\/\/[^\s]*$/i.test(next) && !/^javascript:/i.test(next) ? next : '';
 }
 
-/* ---------------------- Stripe Customer por usuário ------------------------ */
-/** Cartões salvos e assinaturas ficam presos a um Customer da Stripe amarrado
- * ao uid do Firebase (metadata.firebaseUid). Cache em memória evita duplicatas
- * enquanto o índice de busca da Stripe atualiza. */
-const customerIdCache = new Map();
+/** paid|failed|pending a partir do status do pedido/cobrança da Pagar.me. */
+function mapPagarmeStatus(orderStatus, chargeStatus) {
+  if (orderStatus === 'paid' || chargeStatus === 'paid') return 'paid';
+  if (['failed', 'canceled'].includes(orderStatus) || ['failed', 'canceled'].includes(chargeStatus)) return 'failed';
+  return 'pending';
+}
 
-async function getOrCreateCustomerId(user) {
-  if (customerIdCache.has(user.uid)) return customerIdCache.get(user.uid);
-  const found = await stripe.customers.search({
-    query: `metadata['firebaseUid']:'${user.uid}'`,
-    limit: 1,
-  });
-  let customer = found.data[0];
-  if (!customer) {
-    customer = await stripe.customers.create({
-      email: user.email || undefined,
-      metadata: { firebaseUid: user.uid },
-    });
+/* ------------------------- Cliente Pagar.me por usuário --------------------- */
+/** Cartões salvos ficam presos a um Customer da Pagar.me amarrado ao uid do
+ * Firebase — persistido em customers/{uid}.pagarmeCustomerId (sobrevive a
+ * reinícios do servidor, diferente do cache em memória que a versão Stripe
+ * usava). */
+async function getOrCreatePagarmeCustomer(user) {
+  if (db) {
+    const ref = db.doc(`customers/${user.uid}`);
+    const snap = await ref.get();
+    const existing = snap.exists ? snap.data()?.pagarmeCustomerId : null;
+    if (existing) return existing;
   }
-  customerIdCache.set(user.uid, customer.id);
+  const customer = await pagarme.createCustomer({
+    name: user.name || (user.email ? user.email.split('@')[0] : 'Cliente Nexmarket'),
+    email: user.email || undefined,
+    type: 'individual',
+    code: user.uid,
+  });
+  if (db) {
+    await db.doc(`customers/${user.uid}`).set(
+      { pagarmeCustomerId: customer.id, updatedAt: FieldValue.serverTimestamp() },
+      { merge: true },
+    );
+  }
   return customer.id;
 }
 
-/** Garante que o payment method pertence ao Customer do usuário logado. */
-async function assertOwnPaymentMethod(user, paymentMethodId) {
-  const customerId = await getOrCreateCustomerId(user);
-  const pm = await stripe.paymentMethods.retrieve(paymentMethodId);
-  if (pm.customer !== customerId) {
-    throw Object.assign(new Error('Cartão não pertence a este usuário.'), { statusCode: 403 });
-  }
-  return { customerId, pm };
+/**
+ * Monta o split da loja: 90% do subtotal de produtos, como valor fixo (flat,
+ * em centavos) — assim a comissão (10%) + 100% do frete + 100% da taxa de
+ * serviço ficam retidos na plataforma automaticamente (o restante da API não
+ * precisa listar a plataforma como recipient — o que não é dividido fica com
+ * a conta principal por padrão na Pagar.me).
+ *
+ * Sem cadastro de recebedor concluído pela loja, retorna `null`: 100% do
+ * pedido fica retido na plataforma e o repasse deve ser feito manualmente
+ * (ver coleção `settlements` no painel Empresa) até a loja se cadastrar.
+ */
+async function buildStoreSplit(smId, subtotal) {
+  if (!db) return null;
+  const snap = await db.doc(`supermarkets/${smId}`).get();
+  const pg = snap.exists ? snap.data()?.pagarme : null;
+  if (!pg?.recipientId || pg.status !== 'active') return null;
+  const storeAmount = Math.round(Number(subtotal || 0) * (1 - COMMISSION_PCT) * 100);
+  if (!(storeAmount > 0)) return null;
+  return [
+    {
+      amount: storeAmount,
+      type: 'flat',
+      recipient_id: pg.recipientId,
+      options: { liable: false, charge_processing_fee: false, charge_remainder_fee: false },
+    },
+  ];
 }
 
 /* ------------------------------- Diagnóstico ------------------------------- */
 
 app.get('/health', asyncRoute(async (req, res) => {
-  const out = {
+  res.json({
     ok: true,
     service: 'nexmarket-payments',
-    stripe: !!stripe,
+    pagarme: !!pagarme,
     firestoreAdmin: firestoreEnabled,
-    webhookConfigured: !!STRIPE_WEBHOOK_SECRET,
+    webhookConfigured: !!PAGARME_WEBHOOK_SECRET,
     currency: CURRENCY,
-  };
-  if (req.query.deep === '1' && stripe) {
-    const balance = await stripe.balance.retrieve();
-    out.stripeAccountLive = !!balance.livemode;
-  }
-  res.json(out);
+  });
 }));
 
 app.get('/config', (req, res) => {
   res.json({
-    publishableKey: STRIPE_PUBLISHABLE_KEY,
+    publicKey: PAGARME_PUBLIC_KEY,
+    tokenEndpoint: CLIENT_TOKEN_ENDPOINT,
     currency: CURRENCY,
-    provider: 'stripe',
-    paymentsEnabled: !!stripe,
-    // Carteiras adicionais: os apps só exibem as opções habilitadas aqui.
-    wallets: { picpay: !!PICPAY_TOKEN, nupay: NUPAY_CONFIGURED },
+    provider: 'pagarme',
+    paymentsEnabled: !!pagarme,
+    minOrderBRL: MIN_ORDER_BRL,
   });
+});
+
+/** Estimativa de frete/taxa de serviço/comissão antes de fechar o pedido —
+ * usada pelo checkout do app do cliente para mostrar o total real (ver
+ * src/lib/fees.ts, que replica a mesma fórmula localmente para UI instantânea;
+ * este endpoint existe para conferência/uso server-side). */
+app.get('/api/fees/quote', (req, res) => {
+  const subtotal = Number(req.query.subtotal || 0);
+  const distanceKm = Number(req.query.distanceKm || 0);
+  const fulfillment = req.query.fulfillment === 'pickup' ? 'pickup' : 'delivery';
+  res.json(calcOrderBreakdown({ subtotal, distanceKm, fulfillment }));
 });
 
 /* ------------------------------ Autenticação -------------------------------
@@ -250,360 +268,182 @@ app.post('/api/auth/admin-reset-password', requireAuth, asyncRoute(async (req, r
   res.json({ ok: true });
 }));
 
-/* ------------------------- Checkout (cartão online) ------------------------ */
+/* --------------------------- Checkout (cartão/PIX) -------------------------- */
 
-app.post('/api/payments/checkout-session', requireAuth, asyncRoute(async (req, res) => {
-  const { smId, orderId, amount, storeName, next, saveCard } = req.body || {};
-  if (!smId || !orderId) {
-    return res.status(400).json({ error: 'smId e orderId são obrigatórios.' });
-  }
-  const { cents, source, order } = await resolveAmount({ smId, orderId, amount });
-
-  const metadata = {
+/**
+ * Cobra um pedido (kind='order', padrão) ou uma gorjeta avulsa pós-entrega
+ * (kind='tip'). Cartão: recebe `cardToken` (tokenizado no app via
+ * CLIENT_TOKEN_ENDPOINT, o número do cartão nunca passa por este servidor)
+ * ou `cardId` de um cartão salvo. PIX: devolve QR code + copia-e-cola.
+ *
+ * Pedidos com loja já cadastrada como recebedora saem com split automático
+ * (90% do subtotal de produtos vai direto para a conta da loja na Pagar.me).
+ */
+app.post('/api/payments/checkout', requireAuth, asyncRoute(async (req, res) => {
+  const {
     smId,
     orderId,
-    customerId: req.user.uid,
-    amountSource: source,
-  };
-  const deepLink = safeNext(next);
-  const successUrl =
-    `${PUBLIC_URL}/return/success?session_id={CHECKOUT_SESSION_ID}` +
-    (deepLink ? `&next=${encodeURIComponent(deepLink)}` : '');
-  const cancelUrl = `${PUBLIC_URL}/return/cancel` + (deepLink ? `?next=${encodeURIComponent(deepLink)}` : '');
+    paymentMethod,
+    cardToken,
+    cardId,
+    installments,
+    saveCard,
+    kind = 'order',
+    amount: tipAmount,
+    driverName,
+  } = req.body || {};
 
-  // Customer amarrado ao uid: habilita salvar cartão (1 toque nas próximas
-  // compras) e Apple Pay/Google Pay/Link direto na página do Checkout.
-  const customerId = await getOrCreateCustomerId(req.user);
-
-  const session = await stripe.checkout.sessions.create({
-    mode: 'payment',
-    payment_method_types: ['card'],
-    line_items: [
-      {
-        quantity: 1,
-        price_data: {
-          currency: CURRENCY,
-          unit_amount: cents,
-          product_data: {
-            name: `Pedido #${String(orderId).slice(0, 8)}${storeName || order?.storeName ? ` — ${storeName || order?.storeName}` : ''}`,
-            description: 'Compra na plataforma Nexmarket',
-          },
-        },
-      },
-    ],
-    customer: customerId,
-    metadata,
-    payment_intent_data: {
-      metadata,
-      ...(saveCard ? { setup_future_usage: 'off_session' } : {}),
-    },
-    success_url: successUrl,
-    cancel_url: cancelUrl,
-  });
-
-  res.json({ url: session.url, sessionId: session.id, amount: cents / 100 });
-}));
-
-/* ------------------- Carteiras BR: PicPay e NuPay -------------------------- */
-/**
- * PicPay: integração direta com a API pública de e-commerce (token do lojista
- * em PICPAY_TOKEN; o x-seller-token valida o callback e autoriza estornos).
- * NuPay (Nubank): a oferta oficial para e-commerce passa por credenciamento
- * comercial/PSP parceiro — a "costura" abaixo fica pronta e responde 501 até
- * NUPAY_API_URL/NUPAY_API_KEY existirem no ambiente.
- * Os apps consultam GET /config e só exibem as carteiras habilitadas.
- */
-const PICPAY_TOKEN = process.env.PICPAY_TOKEN || '';
-const PICPAY_SELLER_TOKEN = process.env.PICPAY_SELLER_TOKEN || '';
-const PICPAY_API = (process.env.PICPAY_API_URL || 'https://appws.picpay.com/ecommerce/public').replace(/\/$/, '');
-const NUPAY_API_URL = (process.env.NUPAY_API_URL || '').replace(/\/$/, '');
-const NUPAY_API_KEY = process.env.NUPAY_API_KEY || '';
-const NUPAY_CONFIGURED = !!(NUPAY_API_URL && NUPAY_API_KEY);
-
-const walletRef = (smId, orderId) => `${smId}--${orderId}`;
-
-async function picpayFetch(path, init = {}) {
-  const res = await fetch(`${PICPAY_API}${path}`, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', 'x-picpay-token': PICPAY_TOKEN, ...(init.headers || {}) },
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw Object.assign(new Error(body?.message || `PicPay respondeu ${res.status}.`), { statusCode: res.status >= 500 ? 502 : res.status });
-  }
-  return body;
-}
-
-/** Cria a cobrança na carteira. PicPay exige buyer com CPF. */
-app.post('/api/payments/wallet/:provider', requireAuth, asyncRoute(async (req, res) => {
-  const provider = String(req.params.provider);
-  const { smId, orderId, amount, buyer } = req.body || {};
   if (!smId || !orderId) return res.status(400).json({ error: 'smId e orderId são obrigatórios.' });
-  const { cents } = await resolveAmount({ smId, orderId, amount });
-
-  if (provider === 'picpay') {
-    if (!PICPAY_TOKEN) {
-      return res.status(501).json({ error: 'PicPay não está configurado (defina PICPAY_TOKEN no servidor).', walletUnavailable: true });
-    }
-    if (!buyer?.document) {
-      return res.status(400).json({ error: 'Informe o CPF do comprador para pagar com PicPay.', cpfRequired: true });
-    }
-    const payment = await picpayFetch('/payments', {
-      method: 'POST',
-      body: JSON.stringify({
-        referenceId: walletRef(smId, orderId),
-        callbackUrl: `${PUBLIC_URL}/api/webhooks/picpay`,
-        returnUrl: `${PUBLIC_URL}/return/success`,
-        value: cents / 100,
-        expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
-        buyer: {
-          firstName: buyer.firstName || 'Cliente',
-          lastName: buyer.lastName || 'Nexmarket',
-          document: String(buyer.document),
-          email: buyer.email || req.user.email || '',
-          phone: buyer.phone || '',
-        },
-      }),
-    });
-    return res.json({
-      provider,
-      paymentUrl: payment.paymentUrl,
-      qrContent: payment.qrcode?.content || null,
-      qrBase64: payment.qrcode?.base64 || null,
-      expiresAt: payment.expiresAt || null,
-    });
+  if (!['card', 'pix'].includes(paymentMethod)) {
+    return res.status(400).json({ error: 'paymentMethod deve ser "card" ou "pix".' });
   }
-
-  if (provider === 'nupay') {
-    if (!NUPAY_CONFIGURED) {
-      return res.status(501).json({
-        error: 'NuPay requer credenciamento junto ao Nubank/PSP parceiro. Configure NUPAY_API_URL e NUPAY_API_KEY.',
-        walletUnavailable: true,
-      });
-    }
-    // Contrato genérico de PSP — ajuste os campos ao parceiro credenciado.
-    const r = await fetch(`${NUPAY_API_URL}/v1/checkouts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${NUPAY_API_KEY}` },
-      body: JSON.stringify({
-        merchantOrderReference: walletRef(smId, orderId),
-        amount: { value: cents, currency: 'BRL' },
-        returnUrl: `${PUBLIC_URL}/return/success`,
-        webhookUrl: `${PUBLIC_URL}/api/webhooks/nupay`,
-      }),
-    });
-    const body = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      return res.status(502).json({ error: body?.message || `NuPay respondeu ${r.status}.` });
-    }
-    return res.json({ provider, paymentUrl: body.paymentUrl || body.url || null, qrContent: body.qrCode || null, qrBase64: null, expiresAt: body.expiresAt || null });
-  }
-
-  res.status(404).json({ error: 'Carteira desconhecida.' });
-}));
-
-/** Consulta o status da cobrança na carteira e concilia o pedido. */
-app.get('/api/payments/wallet/:provider/status', requireAuth, asyncRoute(async (req, res) => {
-  const provider = String(req.params.provider);
-  const { smId, orderId } = req.query;
-  if (!smId || !orderId) return res.status(400).json({ error: 'Informe smId e orderId.' });
-
-  if (provider === 'picpay') {
-    if (!PICPAY_TOKEN) return res.status(501).json({ error: 'PicPay não configurado.', walletUnavailable: true });
-    const st = await picpayFetch(`/payments/${walletRef(smId, orderId)}/status`);
-    const paid = st.status === 'paid' || st.status === 'completed';
-    if (paid && firestoreEnabled) {
-      await markOrderPaid({ smId: String(smId), orderId: String(orderId), provider: 'picpay', authorizationId: st.authorizationId, method: 'picpay' });
-    }
-    return res.json({ status: st.status, paid, authorizationId: st.authorizationId || null });
-  }
-
-  if (provider === 'nupay') {
-    if (!NUPAY_CONFIGURED) return res.status(501).json({ error: 'NuPay não configurado.', walletUnavailable: true });
-    const r = await fetch(`${NUPAY_API_URL}/v1/checkouts/${walletRef(smId, orderId)}`, {
-      headers: { Authorization: `Bearer ${NUPAY_API_KEY}` },
-    });
-    const body = await r.json().catch(() => ({}));
-    const paid = ['paid', 'completed', 'approved'].includes(String(body.status || '').toLowerCase());
-    if (paid && firestoreEnabled) {
-      await markOrderPaid({ smId: String(smId), orderId: String(orderId), provider: 'nupay', method: 'nupay' });
-    }
-    return res.json({ status: body.status || 'unknown', paid });
-  }
-
-  res.status(404).json({ error: 'Carteira desconhecida.' });
-}));
-
-/** Callback do PicPay: valida o seller token e concilia via consulta de status. */
-app.post('/api/webhooks/picpay', express.json(), asyncRoute(async (req, res) => {
-  if (PICPAY_SELLER_TOKEN && req.headers['x-seller-token'] !== PICPAY_SELLER_TOKEN) {
-    return res.status(401).json({ error: 'x-seller-token inválido.' });
-  }
-  const referenceId = req.body?.referenceId || '';
-  const [smId, orderId] = String(referenceId).split('--');
-  if (smId && orderId && PICPAY_TOKEN) {
-    try {
-      const st = await picpayFetch(`/payments/${referenceId}/status`);
-      if ((st.status === 'paid' || st.status === 'completed') && firestoreEnabled) {
-        await markOrderPaid({ smId, orderId, provider: 'picpay', authorizationId: st.authorizationId, method: 'picpay' });
-      }
-      if ((st.status === 'refunded' || st.status === 'chargeback') && firestoreEnabled) {
-        await markOrderRefunded({ smId, orderId, amount: 0 });
-      }
-    } catch (e) {
-      console.error('[picpay webhook]', e.message);
-    }
-  }
-  res.json({ received: true });
-}));
-
-/* -------------------- Apple Pay / Google Pay (in-app) ---------------------- */
-
-/**
- * PaymentIntent para as carteiras nativas (Apple Pay/Google Pay via
- * @stripe/stripe-react-native). O app confirma com confirmPlatformPayPayment
- * usando o clientSecret — o cartão tokenizado pela carteira nunca passa pelo
- * nosso código. (Na página do Stripe Checkout as carteiras já aparecem
- * automaticamente; este endpoint é para o botão DENTRO do app.)
- */
-app.post('/api/payments/payment-intent', requireAuth, asyncRoute(async (req, res) => {
-  const { smId, orderId, amount } = req.body || {};
-  if (!smId || !orderId) {
-    return res.status(400).json({ error: 'smId e orderId são obrigatórios.' });
-  }
-  const { cents, source } = await resolveAmount({ smId, orderId, amount });
-  const customerId = await getOrCreateCustomerId(req.user);
-
-  const intent = await stripe.paymentIntents.create({
-    amount: cents,
-    currency: CURRENCY,
-    customer: customerId,
-    payment_method_types: ['card'], // Apple Pay/Google Pay tokenizam como card
-    metadata: { smId, orderId, customerId: req.user.uid, amountSource: source, wallet: 'platform_pay' },
-  });
-
-  res.json({
-    clientSecret: intent.client_secret,
-    paymentIntentId: intent.id,
-    publishableKey: STRIPE_PUBLISHABLE_KEY,
-    amount: cents / 100,
-    testEnv: STRIPE_SECRET_KEY.startsWith('sk_test'),
-  });
-}));
-
-/* ------------------------- Cartões salvos (1 toque) ------------------------ */
-
-app.get('/api/payments/saved-methods', requireAuth, asyncRoute(async (req, res) => {
-  const customerId = await getOrCreateCustomerId(req.user);
-  const pms = await stripe.paymentMethods.list({ customer: customerId, type: 'card' });
-  res.json({
-    methods: pms.data.map((pm) => ({
-      id: pm.id,
-      brand: pm.card?.brand || 'card',
-      last4: pm.card?.last4 || '',
-      expMonth: pm.card?.exp_month,
-      expYear: pm.card?.exp_year,
-    })),
-  });
-}));
-
-app.delete('/api/payments/saved-methods/:id', requireAuth, asyncRoute(async (req, res) => {
-  await assertOwnPaymentMethod(req.user, req.params.id);
-  await stripe.paymentMethods.detach(req.params.id);
-  res.json({ ok: true });
-}));
-
-/**
- * Pagamento em 1 toque com cartão salvo (off_session).
- * kind='order' cobra o pedido (valor validado no Firestore quando disponível);
- * kind='tip' cobra uma gorjeta avulsa pós-entrega (valor livre, com teto).
- */
-app.post('/api/payments/charge-saved', requireAuth, asyncRoute(async (req, res) => {
-  const { smId, orderId, paymentMethodId, amount, kind = 'order' } = req.body || {};
-  if (!smId || !orderId || !paymentMethodId) {
-    return res.status(400).json({ error: 'smId, orderId e paymentMethodId são obrigatórios.' });
-  }
-  const { customerId } = await assertOwnPaymentMethod(req.user, paymentMethodId);
+  if (!firestoreEnabled) return res.status(500).json({ error: 'Servidor sem acesso ao Firestore.' });
 
   let cents;
+  let description;
+  let split = null;
+  let afterPaid = async () => {};
+
   if (kind === 'tip') {
-    cents = toCents(amount);
-    const MAX_TIP = toCents(process.env.MAX_TIP_BRL || 200);
-    if (!(cents > 0) || cents > MAX_TIP) {
+    cents = toCents(tipAmount);
+    const maxTipCents = toCents(MAX_TIP_BRL);
+    if (!(cents > 0) || cents > maxTipCents) {
       return res.status(400).json({ error: 'Valor de gorjeta inválido.' });
     }
+    description = `Gorjeta${driverName ? ` para ${driverName}` : ''} — pedido #${String(orderId).slice(0, 8)}`;
+    afterPaid = async () => {
+      await orderRef(smId, orderId).set(
+        { tipPendingCredit: FieldValue.increment(cents / 100), updatedAt: FieldValue.serverTimestamp() },
+        { merge: true },
+      );
+    };
   } else {
-    ({ cents } = await resolveAmount({ smId, orderId, amount }));
+    const order = await getOrder(smId, orderId);
+    if (!order) return res.status(404).json({ error: 'Pedido não encontrado.' });
+    if (order.customerId !== req.user.uid) {
+      return res.status(403).json({ error: 'Este pedido não é seu.' });
+    }
+    if (order.paymentStatus === 'paid') {
+      return res.status(409).json({ error: 'Este pedido já foi pago.' });
+    }
+    cents = toCents(order.total);
+    if (!(cents > 0)) return res.status(400).json({ error: 'Pedido com valor inválido.' });
+    description = `Pedido #${String(orderId).slice(0, 8)}${order.storeName ? ` — ${order.storeName}` : ''}`;
+    split = await buildStoreSplit(smId, order.subtotal);
+    afterPaid = async () => {
+      await markOrderPaid({ smId, orderId, paymentIntentId: pgOrder.id, provider: 'pagarme', method: paymentMethod === 'pix' ? 'pix' : 'card_online' });
+    };
   }
 
-  try {
-    const intent = await stripe.paymentIntents.create({
-      amount: cents,
-      currency: CURRENCY,
-      customer: customerId,
-      payment_method: paymentMethodId,
-      off_session: true,
-      confirm: true,
-      metadata: { smId, orderId, customerId: req.user.uid, type: kind },
-    });
-    // Pedido (não gorjeta) pago → concilia no Firestore quando possível.
-    if (kind === 'order' && intent.status === 'succeeded' && firestoreEnabled) {
-      await markOrderPaid({ smId, orderId, paymentIntentId: intent.id, method: 'card_online' });
+  const customerId = await getOrCreatePagarmeCustomer(req.user);
+
+  const paymentEntry = { payment_method: paymentMethod === 'pix' ? 'pix' : 'credit_card' };
+  if (paymentMethod === 'card') {
+    if (!cardToken && !cardId) {
+      return res.status(400).json({ error: 'cardToken (ou cardId de um cartão salvo) é obrigatório para cartão.' });
     }
-    res.json({
-      ok: intent.status === 'succeeded',
-      status: intent.status,
-      paymentIntentId: intent.id,
-      amount: cents / 100,
-    });
-  } catch (e) {
-    // Cartão exigiu autenticação (3DS) fora de sessão → app cai para o Checkout.
-    if (e?.code === 'authentication_required') {
-      return res.status(402).json({
-        error: 'Este cartão exige autenticação. Use o pagamento pelo navegador.',
-        requiresAction: true,
-      });
-    }
-    throw e;
+    paymentEntry.credit_card = {
+      installments: Math.min(Math.max(Number(installments) || 1, 1), 12),
+      statement_descriptor: 'NEXMARKET',
+      ...(cardToken ? { card_token: cardToken } : { card_id: cardId }),
+    };
+  } else {
+    paymentEntry.pix = { expires_in: 3600 };
   }
+  if (split) paymentEntry.split = split;
+
+  const pgOrder = await pagarme.createOrder({
+    code: orderId,
+    customer_id: customerId,
+    metadata: { smId, orderId, uid: req.user.uid, kind },
+    items: [{ code: orderId, description, amount: cents, quantity: 1 }],
+    payments: [paymentEntry],
+  });
+
+  const charge = pgOrder.charges?.[0];
+  const status = mapPagarmeStatus(pgOrder.status, charge?.status);
+
+  if (status === 'paid') {
+    await afterPaid();
+    if (kind === 'order' && saveCard && cardToken) {
+      // Melhor esforço: não falha o pagamento se o cartão não puder ser salvo.
+      await pagarme.createCustomerCard(customerId, { card_token: cardToken }).catch(() => {});
+    }
+  } else if (status === 'failed' && kind === 'order') {
+    await markOrderPaymentFailed({
+      smId,
+      orderId,
+      paymentIntentId: pgOrder.id,
+      reason: charge?.last_transaction?.gateway_response?.errors?.[0]?.message,
+    });
+  }
+
+  const lastTx = charge?.last_transaction || {};
+  res.json({
+    ok: status === 'paid',
+    status,
+    pagarmeOrderId: pgOrder.id,
+    chargeId: charge?.id || null,
+    amount: cents / 100,
+    ...(paymentMethod === 'pix'
+      ? {
+          pix: {
+            qrData: lastTx.qr_code || null,
+            qrImageUrl: lastTx.qr_code_url || null,
+            expiresAt: lastTx.expires_at || null,
+          },
+        }
+      : {}),
+  });
 }));
 
-/** Gorjeta pós-entrega via Stripe Checkout (quando não há cartão salvo). */
-app.post('/api/payments/tip-checkout', requireAuth, asyncRoute(async (req, res) => {
-  const { smId, orderId, amount, driverName, next } = req.body || {};
-  const cents = toCents(amount);
-  const MAX_TIP = toCents(process.env.MAX_TIP_BRL || 200);
-  if (!smId || !orderId || !(cents > 0) || cents > MAX_TIP) {
-    return res.status(400).json({ error: 'Dados de gorjeta inválidos.' });
+/* ------------------------------ Status/conciliação ------------------------ */
+
+app.get('/api/payments/status', requireAuth, asyncRoute(async (req, res) => {
+  const { pagarmeOrderId, smId, orderId } = req.query;
+  if (!pagarmeOrderId) return res.status(400).json({ error: 'Informe pagarmeOrderId.' });
+
+  const pgOrder = await pagarme.getPagarmeOrder(String(pagarmeOrderId));
+  const charge = pgOrder.charges?.[0];
+  const status = mapPagarmeStatus(pgOrder.status, charge?.status);
+
+  if (status === 'paid' && firestoreEnabled && smId && orderId) {
+    await markOrderPaid({ smId: String(smId), orderId: String(orderId), paymentIntentId: pgOrder.id, provider: 'pagarme' });
   }
-  const customerId = await getOrCreateCustomerId(req.user);
-  const deepLink = safeNext(next);
-  const metadata = { smId, orderId, customerId: req.user.uid, type: 'tip' };
-  const session = await stripe.checkout.sessions.create({
-    mode: 'payment',
-    payment_method_types: ['card'],
-    line_items: [
-      {
-        quantity: 1,
-        price_data: {
-          currency: CURRENCY,
-          unit_amount: cents,
-          product_data: {
-            name: `Gorjeta${driverName ? ` para ${driverName}` : ''} — pedido #${String(orderId).slice(0, 8)}`,
-            description: '100% do valor vai para o entregador',
-          },
-        },
-      },
-    ],
-    customer: customerId,
-    metadata,
-    payment_intent_data: { metadata },
-    success_url:
-      `${PUBLIC_URL}/return/success?session_id={CHECKOUT_SESSION_ID}` +
-      (deepLink ? `&next=${encodeURIComponent(deepLink)}` : ''),
-    cancel_url: `${PUBLIC_URL}/return/cancel` + (deepLink ? `?next=${encodeURIComponent(deepLink)}` : ''),
-  });
-  res.json({ url: session.url, sessionId: session.id, amount: cents / 100 });
+
+  res.json({ status, paid: status === 'paid', pagarmeOrderId: pgOrder.id, chargeId: charge?.id || null });
+}));
+
+/* --------------------------------- Estorno -------------------------------- */
+
+app.post('/api/payments/refund', requireAuth, asyncRoute(async (req, res) => {
+  const { smId, orderId, amount, reason } = req.body || {};
+  if (!smId || !orderId) return res.status(400).json({ error: 'smId e orderId são obrigatórios.' });
+
+  const admin = await isAdminUser(req.user);
+  const owner = !admin && (await isStoreOwner(req.user, smId));
+  if (!admin && !owner) {
+    return res.status(403).json({ error: 'Apenas operadores da plataforma ou o dono da loja podem estornar.' });
+  }
+
+  const order = firestoreEnabled ? await getOrder(smId, orderId) : null;
+  const chargeId = req.body?.chargeId || order?.payment?.chargeId;
+  if (!chargeId) {
+    return res.status(400).json({
+      error: 'Pedido sem cobrança Pagar.me associada (pagamento não-online ou anterior à integração).',
+      notOnline: true,
+    });
+  }
+
+  const cents = amount ? toCents(amount) : undefined;
+  const canceled = await pagarme.cancelCharge(chargeId, cents);
+  const refundedAmount = (cents || toCents(order?.total || 0)) / 100;
+
+  if (firestoreEnabled) {
+    await markOrderRefunded({ smId, orderId, amount: refundedAmount, refundId: canceled.id || chargeId, actorUid: req.user.uid, reason });
+  }
+
+  res.json({ ok: true, refundId: canceled.id || chargeId, amount: refundedAmount, status: canceled.status || 'canceled' });
 }));
 
 /* --------------------- Reembolso self-service por item --------------------- */
@@ -620,8 +460,8 @@ app.post('/api/payments/item-refund', requireAuth, asyncRoute(async (req, res) =
     return res.status(400).json({ error: 'smId, orderId e amount são obrigatórios.' });
   }
 
-  const LIMIT = toCents(process.env.SELF_REFUND_LIMIT_BRL || 50);
-  let paymentIntentId = req.body?.paymentIntentId;
+  const LIMIT = toCents(SELF_REFUND_LIMIT_BRL);
+  let chargeId = req.body?.chargeId;
   let maxCents = LIMIT;
 
   if (firestoreEnabled) {
@@ -633,11 +473,11 @@ app.post('/api/payments/item-refund', requireAuth, asyncRoute(async (req, res) =
     if (order.payment?.selfRefunded) {
       return res.status(409).json({ error: 'Este pedido já recebeu um reembolso automático.' });
     }
-    paymentIntentId = paymentIntentId || order.payment?.paymentIntentId;
+    chargeId = chargeId || order.payment?.chargeId;
     maxCents = Math.min(LIMIT, Math.floor(toCents(order.total || 0) * 0.5));
   }
 
-  if (!paymentIntentId) {
+  if (!chargeId) {
     return res.status(400).json({
       error: 'Pedido sem pagamento online associado — o reembolso será tratado pelo suporte.',
       notOnline: true,
@@ -651,20 +491,14 @@ app.post('/api/payments/item-refund', requireAuth, asyncRoute(async (req, res) =
     });
   }
 
-  const refund = await stripe.refunds.create({
-    payment_intent: paymentIntentId,
-    amount: cents,
-    reason: 'requested_by_customer',
-    metadata: { smId, orderId, requestedBy: req.user.uid, selfService: 'true', note: reason || '' },
-  });
+  const canceled = await pagarme.cancelCharge(chargeId, cents);
 
   if (firestoreEnabled) {
-    const ref = orderRef(smId, orderId);
-    await ref.set(
+    await orderRef(smId, orderId).set(
       {
         payment: {
           refundedAmount: cents / 100,
-          refundId: refund.id,
+          refundId: canceled.id || chargeId,
           refundReason: reason || 'Itens com problema (self-service)',
           refundedAt: FieldValue.serverTimestamp(),
           selfRefunded: true,
@@ -675,228 +509,130 @@ app.post('/api/payments/item-refund', requireAuth, asyncRoute(async (req, res) =
     );
   }
 
-  res.json({ ok: true, refundId: refund.id, amount: cents / 100 });
+  res.json({ ok: true, refundId: canceled.id || chargeId, amount: cents / 100 });
 }));
 
-/* --------------------------------- PIX ------------------------------------ */
+/* ------------------------- Cartões salvos (1 toque) ------------------------ */
 
-app.post('/api/payments/pix-intent', requireAuth, asyncRoute(async (req, res) => {
-  const { smId, orderId, amount } = req.body || {};
-  if (!smId || !orderId) {
-    return res.status(400).json({ error: 'smId e orderId são obrigatórios.' });
-  }
-  const { cents, source } = await resolveAmount({ smId, orderId, amount });
-
-  let intent;
-  try {
-    intent = await stripe.paymentIntents.create({
-      amount: cents,
-      currency: 'brl', // PIX só existe em BRL
-      payment_method_types: ['pix'],
-      payment_method_data: { type: 'pix' },
-      confirm: true,
-      metadata: { smId, orderId, customerId: req.user.uid, amountSource: source },
-    });
-  } catch (e) {
-    // Conta sem o método PIX ativado (precisa habilitar no dashboard Stripe).
-    if (e?.code === 'payment_method_unactivated' || /pix/i.test(e?.message || '')) {
-      return res.status(409).json({
-        error: 'PIX não está habilitado nesta conta Stripe. Ative em Settings → Payment methods.',
-        pixUnavailable: true,
-      });
-    }
-    throw e;
-  }
-
-  const qr = intent.next_action?.pix_display_qr_code || {};
+app.get('/api/payments/saved-methods', requireAuth, asyncRoute(async (req, res) => {
+  const customerId = await getOrCreatePagarmeCustomer(req.user);
+  const list = await pagarme.listCustomerCards(customerId);
   res.json({
-    paymentIntentId: intent.id,
-    status: intent.status,
-    amount: cents / 100,
-    qrData: qr.data || null, // “copia e cola”
-    qrImageUrl: qr.image_url_png || null, // QR code renderizado
-    hostedUrl: qr.hosted_instructions_url || null,
-    expiresAt: qr.expires_at || null,
+    methods: (list.data || []).map((c) => ({
+      id: c.id,
+      brand: c.brand || 'card',
+      last4: c.last_four_digits || '',
+      expMonth: c.exp_month,
+      expYear: c.exp_year,
+    })),
   });
 }));
 
-/* ------------------------------ Status/conciliação ------------------------ */
-
-app.get('/api/payments/status', requireAuth, asyncRoute(async (req, res) => {
-  const { sessionId, paymentIntentId, smId, orderId } = req.query;
-
-  let intent = null;
-  let sessionPaid = false;
-  if (sessionId) {
-    const session = await stripe.checkout.sessions.retrieve(String(sessionId), {
-      expand: ['payment_intent'],
-    });
-    sessionPaid = session.payment_status === 'paid';
-    intent = typeof session.payment_intent === 'object' ? session.payment_intent : null;
-  } else if (paymentIntentId) {
-    intent = await stripe.paymentIntents.retrieve(String(paymentIntentId));
-  } else {
-    return res.status(400).json({ error: 'Informe sessionId ou paymentIntentId.' });
-  }
-
-  const paid = sessionPaid || intent?.status === 'succeeded';
-  const status = paid
-    ? 'paid'
-    : intent?.status === 'canceled'
-      ? 'failed'
-      : intent?.status || 'pending';
-
-  // Conciliação: se o app informou o pedido e temos Firestore admin, persiste.
-  if (paid && firestoreEnabled && smId && orderId) {
-    await markOrderPaid({
-      smId: String(smId),
-      orderId: String(orderId),
-      paymentIntentId: intent?.id,
-      sessionId: sessionId ? String(sessionId) : undefined,
-    });
-  }
-
-  res.json({ status, paid, paymentIntentId: intent?.id || null });
+app.delete('/api/payments/saved-methods/:id', requireAuth, asyncRoute(async (req, res) => {
+  const customerId = await getOrCreatePagarmeCustomer(req.user);
+  await pagarme.deleteCustomerCard(customerId, req.params.id);
+  res.json({ ok: true });
 }));
 
-/* --------------------------------- Estorno -------------------------------- */
+/* ------------------------------ Recebedores --------------------------------
+ * Onboarding de loja e entregador na Pagar.me (KYC + conta bancária). Uma vez
+ * ativo, o recebedor da loja entra automaticamente no split de cada cobrança
+ * (buildStoreSplit); o do entregador só é usado sob demanda, nos repasses
+ * (POST /api/payouts/transfer), porque o entregador de um pedido só é
+ * definido depois que o pagamento já foi feito. */
 
-app.post('/api/payments/refund', requireAuth, asyncRoute(async (req, res) => {
-  const { smId, orderId, paymentIntentId, amount, reason } = req.body || {};
-  if (!smId || !orderId) {
-    return res.status(400).json({ error: 'smId e orderId são obrigatórios.' });
-  }
-
-  const admin = await isAdminUser(req.user);
-  const owner = !admin && (await isStoreOwner(req.user, smId));
-  if (!admin && !owner) {
-    return res.status(403).json({ error: 'Apenas operadores da plataforma ou o dono da loja podem estornar.' });
-  }
-
-  // Descobre o meio de pagamento: corpo da requisição ou o registrado no pedido.
-  let pi = paymentIntentId;
-  let walletProvider = req.body?.provider;
-  let picpayAuth = req.body?.authorizationId;
-  if (firestoreEnabled) {
-    const order = await getOrder(smId, orderId);
-    pi = pi || order?.payment?.paymentIntentId;
-    walletProvider = walletProvider || order?.payment?.provider;
-    picpayAuth = picpayAuth || order?.payment?.authorizationId;
-  }
-
-  // Estorno via PicPay (o pedido foi pago na carteira, não na Stripe).
-  if (walletProvider === 'picpay') {
-    if (!PICPAY_TOKEN) {
-      return res.status(501).json({ error: 'PicPay não configurado para estornos.', walletUnavailable: true });
-    }
-    const refund = await picpayFetch(`/payments/${walletRef(smId, orderId)}/refunds`, {
-      method: 'POST',
-      headers: PICPAY_SELLER_TOKEN ? { 'x-seller-token': PICPAY_SELLER_TOKEN } : {},
-      body: JSON.stringify(picpayAuth ? { authorizationId: picpayAuth } : {}),
-    });
-    if (firestoreEnabled) {
-      await markOrderRefunded({ smId, orderId, amount: Number(amount) || 0, refundId: refund?.refundId || 'picpay', actorUid: req.user.uid, reason });
-    }
-    return res.json({ ok: true, provider: 'picpay', refundId: refund?.refundId || 'picpay', amount: Number(amount) || 0, status: refund?.status || 'refunded' });
-  }
-
-  if (!pi) {
-    return res.status(400).json({
-      error: 'Pedido sem PaymentIntent da Stripe associado (pagamento não-online ou anterior à integração).',
-      notOnline: true,
-    });
-  }
-
-  const refund = await stripe.refunds.create({
-    payment_intent: pi,
-    ...(amount ? { amount: toCents(amount) } : {}),
-    reason: 'requested_by_customer',
-    metadata: { smId, orderId, requestedBy: req.user.uid, note: reason || '' },
-  });
-
-  if (firestoreEnabled) {
-    await markOrderRefunded({
-      smId,
-      orderId,
-      amount: (refund.amount || 0) / 100,
-      refundId: refund.id,
-      actorUid: req.user.uid,
-      reason,
-    });
-  }
-
-  res.json({ ok: true, refundId: refund.id, amount: (refund.amount || 0) / 100, status: refund.status });
-}));
-
-/* --------------------- Stripe Connect (repasse entregador) ----------------- */
-
-/** Cria/recupera a conta Express do entregador logado e devolve o link de onboarding. */
-app.post('/api/connect/account-link', requireAuth, asyncRoute(async (req, res) => {
-  const uid = req.user.uid;
-  let accountId = req.body?.accountId || null;
-
-  if (!accountId && firestoreEnabled) {
-    const snap = await db.doc(`drivers/${uid}`).get();
-    accountId = snap.exists ? snap.data().stripeAccountId || null : null;
-  }
-
-  try {
-    if (!accountId) {
-      const account = await stripe.accounts.create({
-        type: 'express',
-        country: 'BR',
-        email: req.user.email || undefined,
-        // Contas BR exigem card_payments junto com transfers.
-        capabilities: { card_payments: { requested: true }, transfers: { requested: true } },
-        business_type: 'individual',
-        metadata: { driverId: uid },
-      });
-      accountId = account.id;
-      if (firestoreEnabled) {
-        await db.doc(`drivers/${uid}`).set(
-          { stripeAccountId: accountId, updatedAt: FieldValue.serverTimestamp() },
-          { merge: true },
-        );
+function buildRecipientPayload(body) {
+  const isCompany = body.type === 'corporation';
+  const register_information = isCompany
+    ? {
+        type: 'corporation',
+        document: onlyDigits(body.document),
+        email: body.email,
+        company_name: body.companyName || body.name,
+        trading_name: body.tradingName || body.name,
+        annual_revenue: Number(body.annualRevenue) || 0,
+        main_address: body.address,
+        managing_partners: body.managingPartners || [],
       }
-    }
+    : {
+        type: 'individual',
+        document: onlyDigits(body.document),
+        email: body.email,
+        name: body.name,
+        birthdate: body.birthdate,
+        monthly_income: Number(body.monthlyIncome) || 0,
+        professional_occupation: body.occupation || 'Comerciante',
+      };
+  return {
+    register_information,
+    default_bank_account: {
+      holder_name: body.bank?.holderName,
+      holder_type: isCompany ? 'company' : 'individual',
+      holder_document: onlyDigits(body.bank?.holderDocument || body.document),
+      bank: body.bank?.bank,
+      branch_number: body.bank?.branchNumber,
+      branch_check_digit: body.bank?.branchCheckDigit || '',
+      account_number: body.bank?.accountNumber,
+      account_check_digit: body.bank?.accountCheckDigit,
+      type: body.bank?.accountType === 'savings' ? 'savings' : 'checking',
+    },
+    transfer_settings: { transfer_enabled: true, transfer_interval: 'Daily' },
+  };
+}
 
-    const link = await stripe.accountLinks.create({
-      account: accountId,
-      type: 'account_onboarding',
-      refresh_url: `${PUBLIC_URL}/return/cancel`,
-      return_url: `${PUBLIC_URL}/return/success`,
-    });
-    res.json({ accountId, url: link.url });
-  } catch (e) {
-    if (/Connect/i.test(e?.message || '')) {
-      return res.status(409).json({
-        error: 'Stripe Connect não está habilitado nesta conta. Ative em https://dashboard.stripe.com/connect.',
-        connectUnavailable: true,
-      });
-    }
-    throw e;
+app.post('/api/recipients/store', requireAuth, asyncRoute(async (req, res) => {
+  const { smId } = req.body || {};
+  if (!smId) return res.status(400).json({ error: 'smId é obrigatório.' });
+  const owner = await isStoreOwner(req.user, smId);
+  const admin = !owner && (await isAdminUser(req.user));
+  if (!owner && !admin) return res.status(403).json({ error: 'Apenas o dono da loja pode cadastrar o recebedor.' });
+
+  const recipient = await pagarme.createRecipient(buildRecipientPayload(req.body));
+  if (db) {
+    await db.doc(`supermarkets/${smId}`).set(
+      { pagarme: { recipientId: recipient.id, status: recipient.status || 'active', updatedAt: FieldValue.serverTimestamp() } },
+      { merge: true },
+    );
   }
+  res.json({ ok: true, recipientId: recipient.id, status: recipient.status });
 }));
 
-app.get('/api/connect/status', requireAuth, asyncRoute(async (req, res) => {
-  const uid = req.user.uid;
-  let accountId = req.query.accountId || null;
-  if (!accountId && firestoreEnabled) {
-    const snap = await db.doc(`drivers/${uid}`).get();
-    accountId = snap.exists ? snap.data().stripeAccountId || null : null;
-  }
-  if (!accountId) return res.json({ configured: false });
-  const account = await stripe.accounts.retrieve(String(accountId));
-  res.json({
-    configured: true,
-    accountId,
-    payoutsEnabled: !!account.payouts_enabled,
-    detailsSubmitted: !!account.details_submitted,
-  });
+app.get('/api/recipients/store/status', requireAuth, asyncRoute(async (req, res) => {
+  const { smId } = req.query;
+  if (!smId || !db) return res.json({ configured: false });
+  const snap = await db.doc(`supermarkets/${String(smId)}`).get();
+  const pg = snap.exists ? snap.data()?.pagarme : null;
+  if (!pg?.recipientId) return res.json({ configured: false });
+  const recipient = await pagarme.getRecipient(pg.recipientId);
+  res.json({ configured: true, recipientId: pg.recipientId, status: recipient.status });
 }));
 
-/** Admin: transfere o valor de um saque aprovado para a conta Connect do entregador. */
-app.post('/api/connect/payout', requireAuth, asyncRoute(async (req, res) => {
+app.post('/api/recipients/driver', requireAuth, asyncRoute(async (req, res) => {
+  const recipient = await pagarme.createRecipient(buildRecipientPayload({ ...req.body, type: 'individual' }));
+  if (db) {
+    await db.doc(`drivers/${req.user.uid}`).set(
+      { pagarme: { recipientId: recipient.id, status: recipient.status || 'active', updatedAt: FieldValue.serverTimestamp() } },
+      { merge: true },
+    );
+  }
+  res.json({ ok: true, recipientId: recipient.id, status: recipient.status });
+}));
+
+app.get('/api/recipients/driver/status', requireAuth, asyncRoute(async (req, res) => {
+  if (!db) return res.json({ configured: false });
+  const snap = await db.doc(`drivers/${req.user.uid}`).get();
+  const pg = snap.exists ? snap.data()?.pagarme : null;
+  if (!pg?.recipientId) return res.json({ configured: false });
+  const recipient = await pagarme.getRecipient(pg.recipientId);
+  res.json({ configured: true, recipientId: pg.recipientId, status: recipient.status });
+}));
+
+/* --------------------- Repasse sob demanda ao entregador -------------------- */
+
+/** Admin aprova um saque solicitado pelo entregador (drivers/{id}/payouts) e
+ * este endpoint transfere o valor da conta da plataforma para o recebedor do
+ * entregador na Pagar.me. */
+app.post('/api/payouts/transfer', requireAuth, asyncRoute(async (req, res) => {
   if (!(await isAdminUser(req.user))) {
     return res.status(403).json({ error: 'Apenas operadores da plataforma podem executar repasses.' });
   }
@@ -906,33 +642,20 @@ app.post('/api/connect/payout', requireAuth, asyncRoute(async (req, res) => {
     return res.status(400).json({ error: 'driverId e amount são obrigatórios.' });
   }
 
-  let accountId = req.body?.accountId || null;
-  if (!accountId && firestoreEnabled) {
-    const snap = await db.doc(`drivers/${driverId}`).get();
-    accountId = snap.exists ? snap.data().stripeAccountId || null : null;
-  }
-  if (!accountId) {
+  const snap = firestoreEnabled ? await db.doc(`drivers/${driverId}`).get() : null;
+  const recipientId = snap?.exists ? snap.data()?.pagarme?.recipientId : null;
+  if (!recipientId) {
     return res.status(409).json({
-      error: 'Entregador ainda não concluiu o onboarding Stripe Connect.',
+      error: 'Entregador ainda não concluiu o cadastro de recebedor na Pagar.me.',
       connectUnavailable: true,
     });
   }
 
-  const transfer = await stripe.transfers.create({
-    amount: cents,
-    currency: 'brl',
-    destination: accountId,
-    metadata: { driverId, payoutId: payoutId || '' },
-  });
+  const transfer = await pagarme.createTransfer(recipientId, cents, { driverId, payoutId: payoutId || '' });
 
   if (firestoreEnabled && payoutId) {
     await db.doc(`drivers/${driverId}/payouts/${payoutId}`).set(
-      {
-        status: 'paid',
-        transferId: transfer.id,
-        processedBy: req.user.uid,
-        updatedAt: FieldValue.serverTimestamp(),
-      },
+      { status: 'paid', transferId: transfer.id, processedBy: req.user.uid, updatedAt: FieldValue.serverTimestamp() },
       { merge: true },
     );
   }
@@ -966,76 +689,69 @@ app.post('/api/notifications/send', requireAuth, asyncRoute(async (req, res) => 
 
 /* --------------------------------- Webhook -------------------------------- */
 
-async function handleWebhook(req, res) {
-  if (!stripe) {
-    return res.status(501).json({ error: 'Stripe não configurada neste servidor.' });
-  }
-  let event = null;
-  try {
-    if (STRIPE_WEBHOOK_SECRET) {
-      event = stripe.webhooks.constructEvent(req.body, req.headers['stripe-signature'], STRIPE_WEBHOOK_SECRET);
-    } else {
-      // Sem segredo configurado aceita sem verificar (útil só em dev local).
-      event = JSON.parse(req.body.toString('utf8'));
-      console.warn('[webhook] STRIPE_WEBHOOK_SECRET ausente — evento aceito SEM verificação de assinatura.');
-    }
-  } catch (e) {
-    console.error('[webhook] assinatura inválida:', e.message);
-    return res.status(400).json({ error: 'Assinatura de webhook inválida.' });
+/**
+ * A Pagar.me não documenta publicamente um esquema de assinatura HMAC para
+ * v5 (verificado contra a documentação oficial em 2026-09), então a
+ * autenticidade é garantida por um segredo na própria URL do webhook
+ * (?key=...) — configure a mesma string em PAGARME_WEBHOOK_SECRET e no
+ * cadastro do webhook no dashboard Pagar.me. Se a Pagar.me expuser um
+ * cabeçalho de assinatura no futuro, priorize trocar para ele.
+ *
+ * smId/orderId vêm do `metadata` que enviamos ao criar o pedido
+ * (POST /api/payments/checkout) — sem eles o evento é ignorado com log, pois
+ * não há como localizar o pedido no Firestore sem essa referência.
+ */
+app.post('/api/webhooks/pagarme', express.json(), asyncRoute(async (req, res) => {
+  if (PAGARME_WEBHOOK_SECRET && req.query.key !== PAGARME_WEBHOOK_SECRET) {
+    return res.status(401).json({ error: 'Chave de webhook inválida.' });
   }
 
-  const obj = event.data?.object || {};
-  const meta = obj.metadata || {};
-  const { smId, orderId } = meta;
+  const { type, data } = req.body || {};
+  const meta = data?.metadata || data?.order?.metadata || {};
+  const smId = meta.smId;
+  const orderId = meta.orderId || data?.code || data?.order?.code;
+  const pgOrderId = type?.startsWith('order.') ? data?.id : data?.order?.id || data?.id;
+  const chargeId = type?.startsWith('charge.') ? data?.id : data?.charges?.[0]?.id;
+
+  if (!smId || !orderId) {
+    console.warn('[pagarme webhook] evento sem smId/orderId em metadata —', type);
+    return res.json({ received: true, ignored: true });
+  }
 
   try {
-    switch (event.type) {
-      case 'checkout.session.completed':
-        if (obj.payment_status === 'paid' && smId && orderId) {
-          await markOrderPaid({
-            smId,
-            orderId,
-            sessionId: obj.id,
-            paymentIntentId: typeof obj.payment_intent === 'string' ? obj.payment_intent : obj.payment_intent?.id,
-          });
+    switch (type) {
+      case 'order.paid':
+      case 'charge.paid':
+        if (firestoreEnabled) {
+          await markOrderPaid({ smId, orderId, paymentIntentId: pgOrderId, provider: 'pagarme' });
         }
         break;
-      case 'payment_intent.succeeded':
-        if (smId && orderId) {
-          await markOrderPaid({ smId, orderId, paymentIntentId: obj.id });
-        }
-        break;
-      case 'payment_intent.payment_failed':
-        if (smId && orderId) {
+      case 'order.payment_failed':
+      case 'charge.payment_failed':
+        if (firestoreEnabled) {
           await markOrderPaymentFailed({
             smId,
             orderId,
-            paymentIntentId: obj.id,
-            reason: obj.last_payment_error?.message,
+            paymentIntentId: pgOrderId,
+            reason: data?.last_transaction?.gateway_response?.errors?.[0]?.message,
           });
         }
         break;
-      case 'charge.refunded': {
-        const m = obj.metadata || {};
-        if (m.smId && m.orderId) {
-          await markOrderRefunded({
-            smId: m.smId,
-            orderId: m.orderId,
-            amount: (obj.amount_refunded || 0) / 100,
-          });
+      case 'charge.refunded':
+        if (firestoreEnabled) {
+          await markOrderRefunded({ smId, orderId, amount: (data?.amount || 0) / 100, refundId: chargeId });
         }
         break;
-      }
       default:
         break;
     }
   } catch (e) {
-    // Loga mas responde 200 nos casos sem Firestore para a Stripe não re-tentar para sempre.
-    console.error('[webhook] falha ao processar', event.type, e.message);
+    // Loga mas responde 200 para a Pagar.me não re-tentar para sempre.
+    console.error('[pagarme webhook] falha ao processar', type, e.message);
   }
 
-  res.json({ received: true, firestoreAdmin: firestoreEnabled });
-}
+  res.json({ received: true });
+}));
 
 /* --------------------------- Páginas de retorno ---------------------------- */
 
@@ -1055,26 +771,14 @@ ${link ? `<a href="${link}">Voltar para o app</a>` : '<p>Você já pode fechar e
 }
 
 app.get('/return/success', (req, res) => {
-  res
-    .type('html')
-    .send(returnPage({
-      title: 'Pagamento processado ✅',
-      message: 'Tudo certo! Volte para o app para acompanhar seu pedido.',
-      next: req.query.next,
-    }));
+  res.type('html').send(returnPage({ title: 'Pagamento processado ✅', message: 'Tudo certo! Volte para o app para acompanhar seu pedido.', next: req.query.next }));
 });
 
 app.get('/return/cancel', (req, res) => {
-  res
-    .type('html')
-    .send(returnPage({
-      title: 'Pagamento não concluído',
-      message: 'Nenhum valor foi cobrado. Você pode tentar novamente pelo app.',
-      next: req.query.next,
-    }));
+  res.type('html').send(returnPage({ title: 'Pagamento não concluído', message: 'Nenhum valor foi cobrado. Você pode tentar novamente pelo app.', next: req.query.next }));
 });
 
 app.listen(PORT, () => {
   console.log(`⚡ Nexmarket payments server em http://localhost:${PORT}`);
-  console.log(`   Stripe: ${stripe ? (STRIPE_SECRET_KEY.startsWith('sk_test') ? 'TEST mode' : 'LIVE mode') : 'NÃO configurada (pagamentos desativados)'} · Firestore admin: ${firestoreEnabled ? 'ativo' : 'inativo (fallback no cliente)'}`);
+  console.log(`   Pagar.me: ${pagarme ? 'configurada' : 'NÃO configurada (pagamentos desativados)'} · Firestore admin: ${firestoreEnabled ? 'ativo' : 'inativo (fallback no cliente)'}`);
 });
