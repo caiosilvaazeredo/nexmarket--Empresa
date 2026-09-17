@@ -109,16 +109,19 @@ export async function getOrder(smId, orderId) {
 }
 
 /** Marca o pedido como pago (idempotente) — chamado pelo webhook e pelo /status. */
-export async function markOrderPaid({ smId, orderId, paymentIntentId, sessionId, method, provider, authorizationId }) {
+export async function markOrderPaid({ smId, orderId, paymentIntentId, chargeId, sessionId, method, provider, authorizationId }) {
   const ref = orderRef(smId, orderId);
   if (!ref) return false;
   await ref.set(
     {
       paymentStatus: 'paid',
       payment: {
-        provider: provider || 'stripe',
+        provider: provider || 'pagarme',
         status: 'paid',
         ...(paymentIntentId ? { paymentIntentId } : {}),
+        // Id da cobrança (charge) na Pagar.me — necessário para estornar depois
+        // (POST /api/payments/refund usa chargeId, não o id do pedido/order).
+        ...(chargeId ? { chargeId } : {}),
         ...(sessionId ? { checkoutSessionId: sessionId } : {}),
         ...(authorizationId ? { authorizationId } : {}),
         ...(method ? { method } : {}),
@@ -138,7 +141,7 @@ export async function markOrderPaymentFailed({ smId, orderId, paymentIntentId, r
     {
       paymentStatus: 'failed',
       payment: {
-        provider: 'stripe',
+        provider: 'pagarme',
         status: 'failed',
         ...(paymentIntentId ? { paymentIntentId } : {}),
         ...(reason ? { failureReason: reason } : {}),

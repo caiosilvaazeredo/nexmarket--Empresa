@@ -84,8 +84,8 @@ export default function Settings() {
         <Card className="p-5">
           <CardHeader title="Integrações" subtitle="Gateways e serviços externos (RNF05)" icon={<Plug className="w-5 h-5 text-accent" />} className="p-0 mb-4" />
           <div className="space-y-3">
-            <Field label="Gateway de pagamento (Split/estornos)"><Input value={form.paymentsProvider ?? ''} onChange={(e) => set({ paymentsProvider: e.target.value })} placeholder="stripe · pagarme · mercadopago" /></Field>
-            <Field label="Endpoint de pagamentos (servidor)" hint="Servidor da pasta server/ deste repositório — estornos e repasses rodam nele com a chave secreta da Stripe.">
+            <Field label="Gateway de pagamento (Split/estornos)"><Input value={form.paymentsProvider ?? ''} onChange={(e) => set({ paymentsProvider: e.target.value })} placeholder="pagarme" /></Field>
+            <Field label="Endpoint de pagamentos (servidor)" hint="Servidor da pasta server/ deste repositório — estornos e repasses rodam nele com a chave secreta da Pagar.me.">
               <Input value={form.paymentsApiUrl ?? ''} onChange={(e) => set({ paymentsApiUrl: e.target.value })} placeholder="https://pagamentos.suaempresa.com" />
             </Field>
             <PaymentsHealthCheck url={form.paymentsApiUrl || ''} />
@@ -128,7 +128,7 @@ export default function Settings() {
   );
 }
 
-/** Diagnóstico do servidor de pagamentos (server/): Stripe, webhook e Firestore admin. */
+/** Diagnóstico do servidor de pagamentos (server/): Pagar.me, webhook e Firestore admin. */
 function PaymentsHealthCheck({ url }: { url: string }) {
   const [checking, setChecking] = useState(false);
   const [health, setHealth] = useState<GatewayHealth | null>(null);
@@ -160,8 +160,7 @@ function PaymentsHealthCheck({ url }: { url: string }) {
       {error && <p className="text-xs font-bold text-danger">{error}</p>}
       {health && (
         <div className="flex flex-wrap gap-2">
-          <Badge tone={health.stripe ? 'green' : 'red'}>Stripe {health.stripe ? 'OK' : 'falhou'}</Badge>
-          <Badge tone={health.stripeAccountLive ? 'amber' : 'blue'}>{health.stripeAccountLive ? 'Modo LIVE' : 'Modo TESTE'}</Badge>
+          <Badge tone={health.pagarme ? 'green' : 'red'}>Pagar.me {health.pagarme ? 'OK' : 'falhou'}</Badge>
           <Badge tone={health.webhookConfigured ? 'green' : 'amber'}>Webhook {health.webhookConfigured ? 'configurado' : 'pendente'}</Badge>
           <Badge tone={health.firestoreAdmin ? 'green' : 'amber'}>Firestore admin {health.firestoreAdmin ? 'ativo' : 'inativo'}</Badge>
         </div>
