@@ -778,6 +778,66 @@ app.get('/return/cancel', (req, res) => {
   res.type('html').send(returnPage({ title: 'Pagamento não concluído', message: 'Nenhum valor foi cobrado. Você pode tentar novamente pelo app.', next: req.query.next }));
 });
 
+/* --------------------- Expiração de item em falta (10 min) ---------------------
+ * Fluxo de item em falta (especificação "Checklist de separação", seção 3,
+ * item 4): se o cliente não responder à sugestão de substituição/remoção a
+ * tempo, aplica a regra padrão — remove o item com desconto automático.
+ * Mesma fórmula de recomputo de total usada em respondToSubstitutions
+ * (repo nexmarket--cliente, src/lib/orders.ts). Roda a cada 2 minutos; só
+ * age quando o servidor tem Firestore admin (senão os apps já cuidam disso
+ * ao abrir o pedido — ver respondToSubstitutions, que também fecha o
+ * pedido em 'ready' assim que a última pendência é resolvida). */
+const SUBSTITUTION_TIMEOUT_MS = 10 * 60 * 1000;
+
+async function expirePendingSubstitutions() {
+  if (!db) return;
+  try {
+    const snap = await db.collectionGroup('orders').where('status', '==', 'waiting_substitution').get();
+    const now = Date.now();
+    for (const docSnap of snap.docs) {
+      const order = docSnap.data();
+      const items = Array.isArray(order.items) ? order.items : [];
+      let changed = false;
+      const newItems = items.map((it) => {
+        const pending = (it.missing || it.substituted) && (!it.customerDecision || it.customerDecision === 'pending');
+        if (pending && typeof it.missingAt === 'number' && now - it.missingAt > SUBSTITUTION_TIMEOUT_MS) {
+          changed = true;
+          return { ...it, substituted: false, missing: true, customerDecision: 'rejected' };
+        }
+        return it;
+      });
+      if (!changed) continue;
+
+      const stillPending = newItems.some(
+        (it) => (it.missing || it.substituted) && (!it.customerDecision || it.customerDecision === 'pending'),
+      );
+      const subtotal = newItems.reduce((acc, it) => {
+        if (it.missing && it.customerDecision === 'rejected' && !it.substituted) return acc;
+        const price = it.substituted && typeof it.substitutePrice === 'number' ? it.substitutePrice : it.price;
+        return acc + (price || 0) * (it.quantity || 0);
+      }, 0);
+      const total = Math.max(0, subtotal + (order.deliveryFee || 0) - (order.discount || 0));
+
+      await docSnap.ref.set(
+        {
+          items: newItems,
+          total,
+          ...(stillPending ? {} : { status: 'ready' }),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      console.log(`[substitution-timeout] pedido ${docSnap.id}: item(ns) expirado(s) e removido(s) com desconto.`);
+    }
+  } catch (e) {
+    console.error('[substitution-timeout] falha ao expirar substituições pendentes:', e.message);
+  }
+}
+
+if (db) {
+  setInterval(expirePendingSubstitutions, 2 * 60 * 1000);
+}
+
 app.listen(PORT, () => {
   console.log(`⚡ Nexmarket payments server em http://localhost:${PORT}`);
   console.log(`   Pagar.me: ${pagarme ? 'configurada' : 'NÃO configurada (pagamentos desativados)'} · Firestore admin: ${firestoreEnabled ? 'ativo' : 'inativo (fallback no cliente)'}`);
