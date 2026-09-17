@@ -362,7 +362,10 @@ service cloud.firestore {
                 'deliveryAddress', 'customerName', 'customerPhone', 'deliveryFee',
                 'fulfillment', 'paymentMethod', 'paymentStatus', 'payment', 'tip', 'tipPendingCredit',
                 'cashbackCredited', 'scheduledFor', 'changeFor', 'notes',
-                'rating', 'ratingComment', 'ratingTags', 'ratingPhotoUrl'
+                'rating', 'ratingComment', 'ratingTags', 'ratingPhotoUrl',
+                // Checklist de separação: foto da sacola fechada (base64, mesmo padrão de
+                // products.imageUrl/ratingPhotoUrl) e horário em que a separação terminou.
+                'pickingPhotoUrl', 'pickingCompletedAt'
             ])
             && (
                 !incoming().diff(existing()).affectedKeys().hasAny(['driverId'])
@@ -424,6 +427,28 @@ service cloud.firestore {
           && (docId == 'config' || docId == 'appConfig')
           && incoming().diff(existing()).affectedKeys().hasOnly(['configJson', 'updatedAt'])
           && incoming().updatedAt == request.time);
+      }
+
+      // Histórico de ruptura de estoque: um registro por item marcado "não tem"
+      // durante a separação (RF — checklist de separação). Só a loja dona e o
+      // admin leem/escrevem; nunca editado ou apagado (log de eventos).
+      match /stockRuptures/{ruptureId} {
+        allow read: if isAdmin() || (isSignedIn() && isSupermarketOwner(supermarketId));
+
+        function isValidRupture(data) {
+          return data.keys().hasAll(['supermarketId', 'productId', 'productName', 'orderId', 'createdAt'])
+            && data.supermarketId is string && data.supermarketId == supermarketId
+            && data.productId is string && data.productId.size() <= 128
+            && data.productName is string && data.productName.size() <= 200
+            && data.orderId is string && data.orderId.size() <= 128
+            && data.createdAt is timestamp;
+        }
+
+        allow create: if isAdmin() || (isSignedIn() && isSupermarketOwner(supermarketId)
+          && isValidRupture(incoming())
+          && incoming().createdAt == request.time);
+
+        allow update, delete: if false;
       }
     }
   }

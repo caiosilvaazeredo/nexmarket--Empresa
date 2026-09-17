@@ -9,6 +9,7 @@ import {
   MapPin,
   Building2,
   Receipt,
+  PackageX,
 } from 'lucide-react';
 import { Page, PageHeader } from '../components/layout/PageHeader';
 import { Card } from '../components/ui/Card';
@@ -25,6 +26,7 @@ import { usePermission } from '../hooks/usePermission';
 import { useUIStore } from '../store/useUIStore';
 import { subscribeStores, storeApprovalOf, setStoreApproval, setStoreFees } from '../lib/stores';
 import { subscribeStoreOrders } from '../lib/orders';
+import { subscribeStoreRuptures, rankRuptures, type StockRupture } from '../lib/inventory';
 import { storeApprovalBadge, orderStatusBadge } from '../lib/status';
 import { brl, maskCnpj, timeAgo } from '../lib/format';
 import { DEFAULT_COMMISSION_PCT } from '../lib/finance';
@@ -133,6 +135,7 @@ function StoreDrawer({ store, onClose }: { store: Supermarket | null; onClose: (
   const toast = useUIStore((s) => s.toast);
   const canReview = can('stores.review');
   const [orders, setOrders] = useState<Order[]>([]);
+  const [ruptures, setRuptures] = useState<StockRupture[]>([]);
   const [commission, setCommission] = useState('');
   const [fixedFee, setFixedFee] = useState('');
   const [monthlyFee, setMonthlyFee] = useState('');
@@ -143,8 +146,14 @@ function StoreDrawer({ store, onClose }: { store: Supermarket | null; onClose: (
     setFixedFee(String(store.fees?.fixedFee ?? 0));
     setMonthlyFee(String(store.fees?.monthlyFee ?? 0));
     const unsub = subscribeStoreOrders(store.id, 20, setOrders);
-    return () => unsub();
+    const unsubRuptures = subscribeStoreRuptures(store.id, setRuptures);
+    return () => {
+      unsub();
+      unsubRuptures();
+    };
   }, [store?.id]);
+
+  const rupturesRanking = useMemo(() => rankRuptures(ruptures).slice(0, 5), [ruptures]);
 
   if (!store) return null;
   const approval = storeApprovalOf(store);
@@ -233,6 +242,26 @@ function StoreDrawer({ store, onClose }: { store: Supermarket | null; onClose: (
             })}
           </div>
         </Card>
+
+        {/* Ruptura de estoque */}
+        {rupturesRanking.length > 0 && (
+          <Card className="p-5">
+            <div className="flex items-center gap-2 mb-3 font-bold text-slate-700 dark:text-slate-200">
+              <PackageX className="w-4 h-4 text-danger" /> Produtos que mais faltam
+            </div>
+            <div className="space-y-2">
+              {rupturesRanking.map((r) => (
+                <div key={r.productName} className="flex items-center justify-between text-sm">
+                  <span className="text-slate-600 dark:text-slate-300 truncate">{r.productName}</span>
+                  <Badge tone="red">{r.count}x</Badge>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-slate-400 mt-3">
+              Últimas {ruptures.length} rupturas registradas nesta loja. Vale conversar com o parceiro sobre reposição.
+            </p>
+          </Card>
+        )}
 
         {/* Actions */}
         {canReview && (
